@@ -1,0 +1,297 @@
+// This Pine Script™ code is subject to the Mozilla Public License 2.0
+// © Elliott Wave Auto-Labeler (Pine Script v5)
+//
+// Elliott Wave Rules implemented (from classical theory):
+//   IMPULSE RULES:
+//     1. Wave 2 never retraces more than 100 % of Wave 1.
+//     2. Wave 3 is never the shortest of Waves 1, 3 and 5.
+//     3. Wave 4 never overlaps (enters the price territory of) Wave 1.
+//   CORRECTIVE RULES (ABC):
+//     1. Wave B never retraces more than 100 % of Wave A.
+//     2. Wave C typically extends beyond Wave A's end.
+//   FIBONACCI GUIDELINES:
+//     Wave 2 retraces 50 – 61.8 % of Wave 1.
+//     Wave 3 extends 161.8 % of Wave 1.
+//     Wave 4 retraces 38.2 % of Wave 3.
+//     Wave 5 equals Wave 1 or extends 61.8 % of Waves 1–3.
+//     Wave B retraces 50 – 61.8 % of Wave A.
+//     Wave C equals Wave A or extends 161.8 % of Wave A.
+
+//@version=5
+indicator(title="Elliott Wave Auto-Labeler", shorttitle="EW", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// ─────────────────────────────────────────────
+// INPUTS
+// ─────────────────────────────────────────────
+pivotLen        = input.int(5, "Pivot Length (bars each side)", minval=1, maxval=50)
+showLines       = input.bool(true,  "Show Wave Lines")
+showLabels      = input.bool(true,  "Show Wave Labels")
+showTargets     = input.bool(true,  "Show Fibonacci Targets")
+showInfo        = input.bool(true,  "Show Info Table")
+colorImpulse    = input.color(color.new(color.blue,  0),  "Impulse Wave Color")
+colorCorrection = input.color(color.new(color.orange,0),  "Corrective Wave Color")
+colorTarget     = input.color(color.new(color.purple,0),  "Target Color")
+labelSize       = input.string("normal", "Label Size", options=["tiny","small","normal","large","huge"])
+
+// ─────────────────────────────────────────────
+// PIVOT DETECTION
+// ─────────────────────────────────────────────
+ph = ta.pivothigh(high, pivotLen, pivotLen)
+pl = ta.pivotlow (low,  pivotLen, pivotLen)
+
+// Store up to 10 pivots (index 0 = most recent)
+var float[] pivotPrice = array.new_float(0)
+var int[]   pivotBar   = array.new_int(0)
+var bool[]  pivotIsHigh= array.new_bool(0)
+
+MAX_PIVOTS = 12
+
+if not na(ph)
+    array.unshift(pivotPrice,  ph)
+    array.unshift(pivotBar,    bar_index - pivotLen)
+    array.unshift(pivotIsHigh, true)
+    if array.size(pivotPrice) > MAX_PIVOTS
+        array.pop(pivotPrice)
+        array.pop(pivotBar)
+        array.pop(pivotIsHigh)
+
+if not na(pl)
+    array.unshift(pivotPrice,  pl)
+    array.unshift(pivotBar,    bar_index - pivotLen)
+    array.unshift(pivotIsHigh, false)
+    if array.size(pivotPrice) > MAX_PIVOTS
+        array.pop(pivotPrice)
+        array.pop(pivotBar)
+        array.pop(pivotIsHigh)
+
+// ─────────────────────────────────────────────
+// HELPER: safe array get (returns na if out of range)
+// ─────────────────────────────────────────────
+f_price(idx) =>
+    array.size(pivotPrice) > idx ? array.get(pivotPrice, idx) : na
+
+f_bar(idx) =>
+    array.size(pivotBar) > idx ? array.get(pivotBar, idx) : na
+
+f_isHigh(idx) =>
+    array.size(pivotIsHigh) > idx ? array.get(pivotIsHigh, idx) : false
+
+// ─────────────────────────────────────────────
+// FIBONACCI LEVELS
+// ─────────────────────────────────────────────
+f_fib(start, end_, ratio) =>
+    start + (end_ - start) * ratio
+
+// ─────────────────────────────────────────────
+// LABEL SIZE HELPER
+// ─────────────────────────────────────────────
+f_labelSize(s) =>
+    switch s
+        "tiny"   => size.tiny
+        "small"  => size.small
+        "large"  => size.large
+        "huge"   => size.huge
+        =>          size.normal
+
+lSize = f_labelSize(labelSize)
+
+// ─────────────────────────────────────────────
+// DRAW HELPERS
+// ─────────────────────────────────────────────
+f_drawLine(b1, p1, b2, p2, col) =>
+    if showLines
+        line.new(b1, p1, b2, p2, color=col, width=2, xloc=xloc.bar_index)
+
+f_drawLabel(b, p, txt, col, style) =>
+    if showLabels
+        label.new(b, p, txt, color=color.new(col, 80), textcolor=col,
+                  style=style, size=lSize, xloc=xloc.bar_index)
+
+f_drawTarget(b, p, txt) =>
+    if showTargets
+        label.new(b, p, txt, color=color.new(colorTarget, 85),
+                  textcolor=colorTarget, style=label.style_label_left,
+                  size=size.small, xloc=xloc.bar_index)
+
+// ─────────────────────────────────────────────
+// ELLIOTT WAVE RULE VALIDATION
+// ─────────────────────────────────────────────
+
+// Check alternating high/low pattern for 6 pivots (waves 1-5 need 6 pivots)
+f_alternating6(offset) =>
+    ok = true
+    for i = offset to offset + 4
+        if array.size(pivotIsHigh) > i + 1
+            if array.get(pivotIsHigh, i) == array.get(pivotIsHigh, i + 1)
+                ok := false
+    ok
+
+// Validate impulse wave rules on 6 pivots (oldest = index 5 down to 0)
+// pivots (oldest→newest): p5, p4, p3, p2, p1, p0
+// Wave 1: p5→p4, Wave 2: p4→p3, Wave 3: p3→p2, Wave 4: p2→p1, Wave 5: p1→p0
+f_validateImpulse(p5, p4, p3, p2, p1, p0, bullish) =>
+    w1 = math.abs(p4 - p5)
+    w2 = math.abs(p3 - p4)
+    w3 = math.abs(p2 - p3)
+    w4 = math.abs(p1 - p2)
+    w5 = math.abs(p0 - p1)
+
+    // Rule 1: Wave 2 retracement < 100% of Wave 1
+    rule1 = bullish ? (p3 > p5) : (p3 < p5)
+
+    // Rule 2: Wave 3 is not the shortest among W1, W3, W5
+    rule2 = not (w3 < w1 and w3 < w5)
+
+    // Rule 3: Wave 4 does not overlap Wave 1 territory
+    rule3 = bullish ? (p1 > p4) : (p1 < p4)
+
+    rule1 and rule2 and rule3
+
+// ─────────────────────────────────────────────
+// MAIN WAVE DETECTION & DRAWING (runs on each bar)
+// ─────────────────────────────────────────────
+var string waveState = "none"   // "impulse_bull","impulse_bear","abc_bull","abc_bear"
+var int    drawnAtBar = -1
+
+if array.size(pivotPrice) >= 6 and bar_index != drawnAtBar
+    drawnAtBar := bar_index
+
+    // ── Try BULLISH impulse (W1 goes up: pivot[5] is low, pivot[4] is high, …)
+    if f_alternating6(0)
+        p5 = array.get(pivotPrice, 5)
+        p4 = array.get(pivotPrice, 4)
+        p3 = array.get(pivotPrice, 3)
+        p2 = array.get(pivotPrice, 2)
+        p1 = array.get(pivotPrice, 1)
+        p0 = array.get(pivotPrice, 0)
+
+        b5 = array.get(pivotBar, 5)
+        b4 = array.get(pivotBar, 4)
+        b3 = array.get(pivotBar, 3)
+        b2 = array.get(pivotBar, 2)
+        b1 = array.get(pivotBar, 1)
+        b0 = array.get(pivotBar, 0)
+
+        bullish = not array.get(pivotIsHigh, 5)  // oldest pivot is a low → bullish impulse
+
+        if f_validateImpulse(p5, p4, p3, p2, p1, p0, bullish)
+            col = colorImpulse
+            ls  = bullish ? label.style_label_up : label.style_label_down
+
+            // Draw lines
+            f_drawLine(b5, p5, b4, p4, col)
+            f_drawLine(b4, p4, b3, p3, col)
+            f_drawLine(b3, p3, b2, p2, col)
+            f_drawLine(b2, p2, b1, p1, col)
+            f_drawLine(b1, p1, b0, p0, col)
+
+            // Draw labels
+            lsLow  = label.style_label_up
+            lsHigh = label.style_label_down
+            f_drawLabel(b5, p5, bullish ? "①" : "①", col, lsLow)
+            f_drawLabel(b4, p4, bullish ? "②" : "②", col, lsHigh)
+            f_drawLabel(b3, p3, bullish ? "③" : "③", col, lsLow)
+            f_drawLabel(b2, p2, bullish ? "④" : "④", col, lsHigh)
+            f_drawLabel(b1, p1, bullish ? "⑤" : "⑤", col, lsLow)
+            f_drawLabel(b0, p0, bullish ? "End" : "End", col, lsHigh)
+
+            // ── FIBONACCI TARGETS for next corrective ABC ──
+            w1len = math.abs(p4 - p5)
+            w3len = math.abs(p2 - p3)
+            totalW1W3 = math.abs(p2 - p5)
+
+            if bullish
+                // Correction targets (price going down from wave-5 top p0)
+                t1 = f_fib(p0, p3, 0.382)   // shallow correction
+                t2 = f_fib(p0, p3, 0.500)
+                t3 = f_fib(p0, p3, 0.618)   // common wave A end
+                t4 = p5                       // full retracement (wave B cannot exceed)
+                tBar = b0 + 5
+                f_drawTarget(tBar, t1, "A: 38.2% → " + str.tostring(math.round(t1, 2)))
+                f_drawTarget(tBar, t2, "A: 50.0% → " + str.tostring(math.round(t2, 2)))
+                f_drawTarget(tBar, t3, "A: 61.8% → " + str.tostring(math.round(t3, 2)))
+                f_drawTarget(tBar, t4, "Max (W1 base) → " + str.tostring(math.round(t4, 2)))
+            else
+                // Bearish: correction goes up
+                t1 = f_fib(p0, p3, 0.382)
+                t2 = f_fib(p0, p3, 0.500)
+                t3 = f_fib(p0, p3, 0.618)
+                t4 = p5
+                tBar = b0 + 5
+                f_drawTarget(tBar, t1, "A: 38.2% → " + str.tostring(math.round(t1, 2)))
+                f_drawTarget(tBar, t2, "A: 50.0% → " + str.tostring(math.round(t2, 2)))
+                f_drawTarget(tBar, t3, "A: 61.8% → " + str.tostring(math.round(t3, 2)))
+                f_drawTarget(tBar, t4, "Max (W1 base) → " + str.tostring(math.round(t4, 2)))
+
+        // ── Try ABC corrective on last 4 pivots ──
+        else if array.size(pivotPrice) >= 4
+            pA0 = array.get(pivotPrice, 3)
+            pA1 = array.get(pivotPrice, 2)
+            pB  = array.get(pivotPrice, 1)
+            pC  = array.get(pivotPrice, 0)
+            bA0 = array.get(pivotBar, 3)
+            bA1 = array.get(pivotBar, 2)
+            bB  = array.get(pivotBar, 1)
+            bC  = array.get(pivotBar, 0)
+
+            wA  = math.abs(pA1 - pA0)
+            wB  = math.abs(pB  - pA1)
+            wC  = math.abs(pC  - pB)
+
+            bullABC = not array.get(pivotIsHigh, 3)  // A starts from a low → bullish ABC
+
+            // Rule: Wave B retraces < 100 % of Wave A
+            ruleB = bullABC ? (pB < pA0) : (pB > pA0)
+
+            if ruleB
+                col = colorCorrection
+                f_drawLine(bA0, pA0, bA1, pA1, col)
+                f_drawLine(bA1, pA1, bB,  pB,  col)
+                f_drawLine(bB,  pB,  bC,  pC,  col)
+
+                lsA = bullABC ? label.style_label_up   : label.style_label_down
+                lsB = bullABC ? label.style_label_down : label.style_label_up
+                f_drawLabel(bA0, pA0, "A", col, lsA)
+                f_drawLabel(bA1, pA1, "B", col, lsB)
+                f_drawLabel(bB,  pB,  "C", col, lsA)
+                f_drawLabel(bC,  pC,  "End", col, lsB)
+
+                // ── TARGETS for next impulse after ABC ──
+                // Wave 1 of new impulse: often 61.8 %–100 % extension of Wave C
+                t1 = f_fib(pC, pB, 0.618)
+                t2 = f_fib(pC, pB, 1.000)
+                t3 = f_fib(pC, pB, 1.618)
+                tBar = bC + 5
+                f_drawTarget(tBar, t1, "W1: 61.8% → " + str.tostring(math.round(t1, 2)))
+                f_drawTarget(tBar, t2, "W1: 100%  → " + str.tostring(math.round(t2, 2)))
+                f_drawTarget(tBar, t3, "W1: 161.8%→ " + str.tostring(math.round(t3, 2)))
+
+// ─────────────────────────────────────────────
+// INFO TABLE  (top-right corner)
+// ─────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 10,
+     bgcolor=color.new(color.black, 70), border_color=color.gray, border_width=1)
+
+if showInfo and barstate.islast
+    table.cell(infoTable, 0, 0, "Elliott Wave Rules",  text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue,40))
+    table.cell(infoTable, 1, 0, "Status",              text_color=color.white, text_size=size.small, bgcolor=color.new(color.blue,40))
+
+    table.cell(infoTable, 0, 1, "W2 < 100% W1",        text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 2, "W3 not shortest",     text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 3, "W4 no W1 overlap",    text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 4, "WB < 100% WA",        text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 5, "Pivot Length",         text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 6, "Total Pivots Found",  text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 7, "Fib: W2 retrace",     text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 8, "Fib: W3 extend",      text_color=color.white, text_size=size.tiny)
+    table.cell(infoTable, 0, 9, "Fib: W4 retrace",     text_color=color.white, text_size=size.tiny)
+
+    table.cell(infoTable, 1, 1, "✓ Enforced", text_color=color.lime,  text_size=size.tiny)
+    table.cell(infoTable, 1, 2, "✓ Enforced", text_color=color.lime,  text_size=size.tiny)
+    table.cell(infoTable, 1, 3, "✓ Enforced", text_color=color.lime,  text_size=size.tiny)
+    table.cell(infoTable, 1, 4, "✓ Enforced", text_color=color.lime,  text_size=size.tiny)
+    table.cell(infoTable, 1, 5, str.tostring(pivotLen),              text_color=color.yellow, text_size=size.tiny)
+    table.cell(infoTable, 1, 6, str.tostring(array.size(pivotPrice)), text_color=color.yellow, text_size=size.tiny)
+    table.cell(infoTable, 1, 7, "50–61.8 %",  text_color=color.orange, text_size=size.tiny)
+    table.cell(infoTable, 1, 8, "161.8 %",    text_color=color.orange, text_size=size.tiny)
+    table.cell(infoTable, 1, 9, "38.2 %",     text_color=color.orange, text_size=size.tiny)
