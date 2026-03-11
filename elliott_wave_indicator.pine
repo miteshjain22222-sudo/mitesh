@@ -1,0 +1,292 @@
+// ============================================================================
+// Elliott Wave Indicator for TradingView
+// ============================================================================
+// Based on R.N. Elliott's Wave Principle and Robert Prechter's
+// "Elliott Wave Principle: Key to Market Behavior"
+//
+// HOW TO USE
+// ----------
+// 1. Open TradingView → Pine Script Editor (bottom panel)
+// 2. Paste this entire script and click "Add to chart"
+// 3. Adjust the "Pivot Bars Left / Right" inputs to control sensitivity
+//
+// WHAT IT DOES
+// ------------
+// • Detects swing pivots (swing highs and swing lows)
+// • Labels the most recent Elliott Wave sequence (1-2-3-4-5 or A-B-C)
+// • Validates the three hard Elliott Wave rules
+// • Draws Fibonacci retracement and extension levels as horizontal lines
+// • Annotates the next expected wave and its price targets
+//
+// ELLIOTT WAVE RULES ENFORCED
+// ---------------------------
+// Impulse:
+//   Rule 1 – Wave 2 never retraces more than 100% of Wave 1
+//   Rule 2 – Wave 3 is never the shortest among Waves 1, 3, 5
+//   Rule 3 – Wave 4 never overlaps Wave 1's price territory
+// Corrective (ABC):
+//   • Wave B retraces between 23.6% and 100% of Wave A
+//   • Wave C ≥ 61.8% of Wave A
+// ============================================================================
+
+//@version=5
+indicator("Elliott Wave Analyzer", overlay=true, max_lines_count=100, max_labels_count=100)
+
+// ─── Inputs ────────────────────────────────────────────────────────────────
+pivotBarsLeft  = input.int(5, "Pivot Bars Left",  minval=1, maxval=20, group="Pivot Detection")
+pivotBarsRight = input.int(5, "Pivot Bars Right", minval=1, maxval=20, group="Pivot Detection")
+showImpulse    = input.bool(true,  "Show Impulse Waves (1-2-3-4-5)", group="Display")
+showCorrective = input.bool(true,  "Show Corrective Waves (A-B-C)",  group="Display")
+showFiboLevels = input.bool(true,  "Show Fibonacci Levels",          group="Display")
+showTargets    = input.bool(true,  "Show Next Wave Targets",          group="Display")
+showViolations = input.bool(true,  "Show Rule Violations",            group="Display")
+
+// ─── Colors ────────────────────────────────────────────────────────────────
+colorWave1  = input.color(color.new(color.blue,   0), "Wave 1 / A", group="Colors")
+colorWave2  = input.color(color.new(color.red,    0), "Wave 2 / B", group="Colors")
+colorWave3  = input.color(color.new(color.green,  0), "Wave 3 / C", group="Colors")
+colorWave4  = input.color(color.new(color.orange, 0), "Wave 4",     group="Colors")
+colorWave5  = input.color(color.new(color.purple, 0), "Wave 5",     group="Colors")
+colorFibo   = input.color(color.new(color.gray,  50), "Fibonacci",  group="Colors")
+colorTarget = input.color(color.new(color.teal,  30), "Target",     group="Colors")
+colorViol   = input.color(color.new(color.red,   30), "Violation",  group="Colors")
+
+// ─── Pivot detection ───────────────────────────────────────────────────────
+// A pivot HIGH at bar[i] means it is the highest bar in a window of
+// pivotBarsLeft bars to the left and pivotBarsRight bars to the right.
+pivotHigh = ta.pivothigh(high, pivotBarsLeft, pivotBarsRight)
+pivotLow  = ta.pivotlow (low,  pivotBarsLeft, pivotBarsRight)
+
+// ─── Store up to 6 pivots in arrays ────────────────────────────────────────
+// Arrays are prefilled; we push when a confirmed pivot arrives.
+var float[] pivotPrices  = array.new_float(0)
+var int[]   pivotBars    = array.new_int(0)
+var bool[]  pivotIsHigh  = array.new_bool(0)
+
+MAX_PIVOTS = 6   // need at most 6 pivots to count 5 waves
+
+if not na(pivotHigh)
+    if array.size(pivotPrices) >= MAX_PIVOTS
+        array.shift(pivotPrices)
+        array.shift(pivotBars)
+        array.shift(pivotIsHigh)
+    array.push(pivotPrices,  pivotHigh)
+    array.push(pivotBars,    bar_index - pivotBarsRight)
+    array.push(pivotIsHigh,  true)
+
+if not na(pivotLow)
+    if array.size(pivotPrices) >= MAX_PIVOTS
+        array.shift(pivotPrices)
+        array.shift(pivotBars)
+        array.shift(pivotIsHigh)
+    array.push(pivotPrices,  pivotLow)
+    array.push(pivotBars,    bar_index - pivotBarsRight)
+    array.push(pivotIsHigh,  false)
+
+// ─── Helpers ───────────────────────────────────────────────────────────────
+// Return price at pivot index i (0 = oldest in current window)
+getPrice(i) =>
+    sz = array.size(pivotPrices)
+    i < sz ? array.get(pivotPrices, i) : na
+
+getBar(i) =>
+    sz = array.size(pivotBars)
+    i < sz ? array.get(pivotBars, i) : na
+
+getIsHigh(i) =>
+    sz = array.size(pivotIsHigh)
+    i < sz ? array.get(pivotIsHigh, i) : false
+
+pivotCount() =>
+    array.size(pivotPrices)
+
+waveLength(startPrice, endPrice) =>
+    math.abs(endPrice - startPrice)
+
+// ─── Fibonacci level calculations ──────────────────────────────────────────
+// Retracement of a move from waveStart → waveEnd, measured back toward waveStart
+fiboRetrace(waveStart, waveEnd, ratio) =>
+    waveEnd - (waveEnd - waveStart) * ratio
+
+// Extension from refStart using the magnitude of waveStart→waveEnd
+fiboExtend(waveStart, waveEnd, refStart, ratio) =>
+    move = math.abs(waveEnd - waveStart)
+    direction = waveEnd > waveStart ? 1.0 : -1.0
+    refStart + direction * move * ratio
+
+// ─── Elliott Wave validation ───────────────────────────────────────────────
+// Returns true when the 5-pivot sequence (6 prices: p0…p5) satisfies all
+// three hard rules for an impulse wave in the given direction.
+//   direction: 1 = bullish impulse (W1 up), -1 = bearish impulse (W1 down)
+isValidImpulse(p0, p1, p2, p3, p4, p5, direction) =>
+    // Lengths of motive sub-waves
+    len1 = waveLength(p0, p1)
+    len2 = waveLength(p1, p2)
+    len3 = waveLength(p2, p3)
+    len4 = waveLength(p3, p4)
+    len5 = waveLength(p4, p5)
+
+    // Rule 1: Wave 2 must not retrace more than 100% of Wave 1
+    rule1 = len2 <= len1
+
+    // Rule 2: Wave 3 must not be the shortest motive wave
+    rule2 = len3 >= len1 or len3 >= len5
+
+    // Rule 3: Wave 4 must not overlap Wave 1's price territory
+    w1High = direction ==  1 ? p1 : p0
+    w1Low  = direction ==  1 ? p0 : p1
+    w4High = direction ==  1 ? math.max(p3, p4) : math.min(p3, p4)
+    w4Low  = direction ==  1 ? math.min(p3, p4) : math.max(p3, p4)
+    // Wave 4 end must stay above Wave 1 end for a bullish impulse (below for bearish)
+    rule3 = direction == 1 ? p4 > p1 : p4 < p1
+
+    rule1 and rule2 and rule3
+
+// ─── Main drawing logic ────────────────────────────────────────────────────
+// Only draw on the last bar to keep the chart clean
+if barstate.islast
+    pc = pivotCount()
+
+    // ── Try 5-wave impulse (needs 6 pivots: points 0..5) ──────────────────
+    if showImpulse and pc >= 6
+        p0 = getPrice(0)
+        p1 = getPrice(1)
+        p2 = getPrice(2)
+        p3 = getPrice(3)
+        p4 = getPrice(4)
+        p5 = getPrice(5)
+
+        b0 = getBar(0)
+        b1 = getBar(1)
+        b2 = getBar(2)
+        b3 = getBar(3)
+        b4 = getBar(4)
+        b5 = getBar(5)
+
+        bullish = p1 > p0   // Wave 1 goes up → bullish impulse
+        dir     = bullish ? 1 : -1
+        valid   = isValidImpulse(p0, p1, p2, p3, p4, p5, dir)
+
+        waveColors = array.from(colorWave1, colorWave2, colorWave3, colorWave4, colorWave5)
+        waveLabels = array.from("①", "②", "③", "④", "⑤")
+        waveBarArr = array.from(b0, b1, b2, b3, b4, b5)
+        wavePrArr  = array.from(p0, p1, p2, p3, p4, p5)
+
+        // Draw wave lines
+        for i = 0 to 4
+            clr = array.get(waveColors, i)
+            line.new(array.get(waveBarArr, i), array.get(wavePrArr, i),
+                     array.get(waveBarArr, i+1), array.get(wavePrArr, i+1),
+                     color=clr, width=2)
+            // Wave label at midpoint
+            midBar   = math.round((array.get(waveBarArr, i) + array.get(waveBarArr, i+1)) / 2)
+            midPrice = (array.get(wavePrArr, i) + array.get(wavePrArr, i+1)) / 2
+            label.new(midBar, midPrice,
+                      text=array.get(waveLabels, i),
+                      color=color.new(clr, 70),
+                      textcolor=clr,
+                      style=label.style_label_center,
+                      size=size.normal)
+
+        // ── Fibonacci targets for the next wave (Wave 5 extensions if 4 done) ──
+        if showFiboLevels or showTargets
+            // Wave 5 not yet formed – project targets from Wave 4 end (p4)
+            // Wave 5 equality with Wave 1
+            len1      = waveLength(p0, p1)
+            w5_eq_w1  = bullish ? p4 + len1 : p4 - len1
+            // Wave 5 = 61.8% of Wave 1
+            w5_618    = bullish ? p4 + len1 * 0.618 : p4 - len1 * 0.618
+            // Wave 5 = 161.8% of Wave 1
+            w5_1618   = bullish ? p4 + len1 * 1.618 : p4 - len1 * 1.618
+
+            if showTargets
+                label.new(bar_index + 5, w5_eq_w1,
+                          text="W5 = W1 (" + str.tostring(w5_eq_w1, "#.##") + ")",
+                          color=color.new(colorTarget, 20), textcolor=color.white,
+                          style=label.style_label_left, size=size.small)
+                label.new(bar_index + 5, w5_618,
+                          text="W5 = 61.8% W1 (" + str.tostring(w5_618, "#.##") + ")",
+                          color=color.new(colorTarget, 40), textcolor=color.white,
+                          style=label.style_label_left, size=size.small)
+                label.new(bar_index + 5, w5_1618,
+                          text="W5 = 161.8% W1 (" + str.tostring(w5_1618, "#.##") + ")",
+                          color=color.new(colorTarget, 40), textcolor=color.white,
+                          style=label.style_label_left, size=size.small)
+
+            // Fibonacci levels on Wave 3 (most important)
+            if showFiboLevels
+                fiboLevels  = array.from(0.236, 0.382, 0.500, 0.618, 0.786)
+                for fi = 0 to array.size(fiboLevels) - 1
+                    ratio = array.get(fiboLevels, fi)
+                    lvl   = fiboRetrace(p2, p3, ratio)
+                    line.new(b3, lvl, bar_index + 10, lvl,
+                             color=colorFibo, style=line.style_dashed, width=1)
+                    label.new(bar_index + 10, lvl,
+                              text=str.tostring(ratio * 100, "#.#") + "%",
+                              color=color.new(colorFibo, 60), textcolor=colorFibo,
+                              style=label.style_label_left, size=size.tiny)
+
+        // Show rule violation banner
+        if showViolations and not valid
+            label.new(bar_index, high * 1.002,
+                      text="⚠ Elliott Rule Violation – count may be incorrect",
+                      color=color.new(colorViol, 20), textcolor=color.white,
+                      style=label.style_label_down, size=size.normal)
+
+    // ── Try 3-wave corrective (needs 4 pivots: points 0..3) ───────────────
+    if showCorrective and pc >= 4 and pc < 6
+        pA = getPrice(0)
+        pB = getPrice(1)
+        pC = getPrice(2)
+
+        bA = getBar(0)
+        bB = getBar(1)
+        bC = getBar(2)
+
+        lenA = waveLength(pA, pB)
+        lenB = waveLength(pB, pC)
+
+        corrColors = array.from(colorWave1, colorWave2, colorWave3)
+        corrLabels = array.from("Ⓐ", "Ⓑ", "Ⓒ")
+        corrBars   = array.from(bA, bB, bC)
+        corrPrices = array.from(pA, pB, pC)
+
+        for i = 0 to 1
+            clr = array.get(corrColors, i)
+            line.new(array.get(corrBars, i), array.get(corrPrices, i),
+                     array.get(corrBars, i+1), array.get(corrPrices, i+1),
+                     color=clr, width=2, style=line.style_dashed)
+            midBar   = math.round((array.get(corrBars, i) + array.get(corrBars, i+1)) / 2)
+            midPrice = (array.get(corrPrices, i) + array.get(corrPrices, i+1)) / 2
+            label.new(midBar, midPrice,
+                      text=array.get(corrLabels, i),
+                      color=color.new(clr, 70),
+                      textcolor=clr,
+                      style=label.style_label_center,
+                      size=size.normal)
+
+        // Project Wave C targets
+        if showTargets
+            bullishABC = pB > pA   // Wave A is down when pB < pA
+            cEqA       = bullishABC ? pC + lenA : pC - lenA
+            c1618      = bullishABC ? pC + lenA * 1.618 : pC - lenA * 1.618
+            c0618      = bullishABC ? pC + lenA * 0.618 : pC - lenA * 0.618
+
+            label.new(bar_index + 5, cEqA,
+                      text="Ⓒ = Ⓐ (" + str.tostring(cEqA, "#.##") + ")",
+                      color=color.new(colorTarget, 20), textcolor=color.white,
+                      style=label.style_label_left, size=size.small)
+            label.new(bar_index + 5, c0618,
+                      text="Ⓒ = 61.8% Ⓐ (" + str.tostring(c0618, "#.##") + ")",
+                      color=color.new(colorTarget, 40), textcolor=color.white,
+                      style=label.style_label_left, size=size.small)
+            label.new(bar_index + 5, c1618,
+                      text="Ⓒ = 161.8% Ⓐ (" + str.tostring(c1618, "#.##") + ")",
+                      color=color.new(colorTarget, 40), textcolor=color.white,
+                      style=label.style_label_left, size=size.small)
+
+// ─── Plot pivot markers ────────────────────────────────────────────────────
+plotshape(not na(pivotHigh), title="Pivot High", style=shape.triangledown,
+          location=location.abovebar, color=color.red, size=size.tiny)
+plotshape(not na(pivotLow),  title="Pivot Low",  style=shape.triangleup,
+          location=location.belowbar, color=color.green, size=size.tiny)
