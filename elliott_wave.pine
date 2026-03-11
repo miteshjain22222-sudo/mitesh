@@ -2,12 +2,14 @@
 indicator("Elliott Wave Numbers - FINAL v6", overlay=true, max_labels_count=500)
 
 // Inputs
-pivot_length = input.int(5, "Pivot Length", minval=2, maxval=20)
-show_table = input.bool(true, "Show Status Table")
+pivot_length   = input.int(5,    "Pivot Length",         minval=2, maxval=20)
+show_table     = input.bool(true, "Show Status Table")
+show_forecast  = input.bool(true, "Show 2-Wave Forecast")
+forecast_bars  = input.int(20,   "Forecast Bars Ahead",  minval=5, maxval=200)
 
 // Pivot detection
 pivot_high = ta.pivothigh(high, pivot_length, pivot_length)
-pivot_low = ta.pivotlow(low, pivot_length, pivot_length)
+pivot_low  = ta.pivotlow(low,  pivot_length, pivot_length)
 
 // Sequential wave counters — each pivot gets ONE individual wave number
 // High pivots cycle through: ① → ③ → ⑤ → ① → ...
@@ -18,15 +20,21 @@ var int low_wave_idx  = 0
 var high_wave_labels = array.from("①", "③", "⑤")
 var low_wave_labels  = array.from("②", "④")
 
+// Track last pivot type and price for forecast
+var bool  last_was_high   = true
+var float last_pivot_price = close
+
 // Label LOW pivots — individual wave number (② or ④)
 if not na(pivot_low)
     lbl = array.get(low_wave_labels, low_wave_idx % array.size(low_wave_labels))
     label.new(bar_index[pivot_length], low[pivot_length], lbl,
               color=color.new(color.orange, 0),
               style=label.style_label_up,
-              size=size.normal,
+              size=size.large,
               textcolor=color.white)
-    low_wave_idx := low_wave_idx + 1
+    low_wave_idx     := low_wave_idx + 1
+    last_was_high    := false
+    last_pivot_price := low[pivot_length]
 
 // Label HIGH pivots — individual wave number (①, ③, or ⑤)
 if not na(pivot_high)
@@ -34,9 +42,66 @@ if not na(pivot_high)
     label.new(bar_index[pivot_length], high[pivot_length], lbl,
               color=color.new(color.purple, 0),
               style=label.style_label_down,
-              size=size.normal,
+              size=size.large,
               textcolor=color.white)
-    high_wave_idx := high_wave_idx + 1
+    high_wave_idx    := high_wave_idx + 1
+    last_was_high    := true
+    last_pivot_price := high[pivot_length]
+
+// ── 2-Wave Forecast ──────────────────────────────────────────────
+// On the last bar draw 2 dashed labels projected to the right showing
+// the two next expected wave numbers and their likely direction.
+var label forecast_lbl1 = na
+var label forecast_lbl2 = na
+
+if barstate.islast and show_forecast
+    // Remove stale forecast labels from the previous bar
+    label.delete(forecast_lbl1)
+    label.delete(forecast_lbl2)
+
+    // Price range over last 50 bars — used to offset forecast prices
+    price_range = ta.highest(high, 50) - ta.lowest(low, 50)
+    step        = price_range * 0.25   // vertical gap per forecast wave
+
+    f1_bar = bar_index + forecast_bars
+    f2_bar = bar_index + forecast_bars * 2
+
+    if last_was_high
+        // Last confirmed pivot was a HIGH → expect LOW next, then HIGH
+        next1 = array.get(low_wave_labels,  low_wave_idx  % array.size(low_wave_labels))
+        next2 = array.get(high_wave_labels, high_wave_idx % array.size(high_wave_labels))
+        f1_price = last_pivot_price - step
+        f2_price = last_pivot_price
+        forecast_lbl1 := label.new(f1_bar, f1_price,
+                                   "🔮 " + next1 + "\nNext Low",
+                                   color=color.new(color.orange, 30),
+                                   style=label.style_label_up,
+                                   size=size.large,
+                                   textcolor=color.white)
+        forecast_lbl2 := label.new(f2_bar, f2_price,
+                                   "🔮 " + next2 + "\nNext High",
+                                   color=color.new(color.purple, 30),
+                                   style=label.style_label_down,
+                                   size=size.large,
+                                   textcolor=color.white)
+    else
+        // Last confirmed pivot was a LOW → expect HIGH next, then LOW
+        next1 = array.get(high_wave_labels, high_wave_idx % array.size(high_wave_labels))
+        next2 = array.get(low_wave_labels,  low_wave_idx  % array.size(low_wave_labels))
+        f1_price = last_pivot_price + step
+        f2_price = last_pivot_price
+        forecast_lbl1 := label.new(f1_bar, f1_price,
+                                   "🔮 " + next1 + "\nNext High",
+                                   color=color.new(color.purple, 30),
+                                   style=label.style_label_down,
+                                   size=size.large,
+                                   textcolor=color.white)
+        forecast_lbl2 := label.new(f2_bar, f2_price,
+                                   "🔮 " + next2 + "\nNext Low",
+                                   color=color.new(color.orange, 30),
+                                   style=label.style_label_up,
+                                   size=size.large,
+                                   textcolor=color.white)
 
 // Status Table (Top Right)
 if barstate.islast and show_table
@@ -65,25 +130,32 @@ if barstate.islast and show_table
     table.cell(status_table, 1, 2, "HIGH PIVOTS\n(Wave 1, 3, 5)",
                text_color=color.black, text_size=size.tiny)
 
+    // Forecast row
+    table.cell(status_table, 0, 3, "🔮 FORECAST",
+               bgcolor=color.new(color.teal, 50),
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 3, "Next 2 Waves\nProjected Right",
+               text_color=color.white, text_size=size.tiny)
+
     // Instructions
-    table.cell(status_table, 0, 3, "🎯 INSTRUCTIONS",
+    table.cell(status_table, 0, 4, "🎯 INSTRUCTIONS",
                bgcolor=color.new(color.navy, 50),
                text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 3, "1. Zoom Out\n2. Scroll Left\n3. Pivot 3-8",
+    table.cell(status_table, 1, 4, "1. Zoom Out\n2. Scroll Left\n3. Pivot 3-8",
                text_color=color.yellow, text_size=size.tiny)
 
     // Best timeframes
-    table.cell(status_table, 0, 4, "⏰ BEST TF",
+    table.cell(status_table, 0, 5, "⏰ BEST TF",
                bgcolor=color.new(color.blue, 50),
                text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 4, "NIFTY: 15m/1H\nBNF: 5m/15m",
+    table.cell(status_table, 1, 5, "NIFTY: 15m/1H\nBNF: 5m/15m",
                text_color=color.aqua, text_size=size.tiny)
 
     // Alerts info
-    table.cell(status_table, 0, 5, "🔔 ALERTS",
+    table.cell(status_table, 0, 6, "🔔 ALERTS",
                bgcolor=color.new(color.maroon, 50),
                text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 5, "High/Low\nPivot Alerts",
+    table.cell(status_table, 1, 6, "High/Low\nPivot Alerts",
                text_color=color.yellow, text_size=size.tiny)
 
 // Alerts
