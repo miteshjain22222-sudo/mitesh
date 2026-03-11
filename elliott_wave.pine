@@ -1,0 +1,82 @@
+//@version=6
+indicator("Elliott Wave Numbers - FINAL v6", overlay=true, max_labels_count=500)
+
+// Inputs
+pivot_length = input.int(5, "Pivot Length", minval=2, maxval=20)
+max_bars_back = input.int(500, "Bars Back", minval=100, maxval=2000)
+show_table = input.bool(true, "Show Status Table")
+
+// Pivot detection
+pivot_high = ta.pivothigh(high, pivot_length, pivot_length)
+pivot_low = ta.pivotlow(low, pivot_length, pivot_length)
+
+// Label LOW pivots (Wave 2, 4)
+if not na(pivot_low)
+    label.new(bar_index[pivot_length], low[pivot_length], "②④", 
+              color=color.new(color.orange, 0), 
+              style=label.style_label_up, 
+              size=size.normal, 
+              textcolor=color.white)
+
+// Label HIGH pivots (Wave 1, 3, 5)
+if not na(pivot_high)
+    label.new(bar_index[pivot_length], high[pivot_length], "①③⑤", 
+              color=color.new(color.purple, 0), 
+              style=label.style_label_down, 
+              size=size.normal, 
+              textcolor=color.white)
+
+// Status Table (Top Right)
+if barstate.islast and show_table
+    var status_table = table.new(position.top_right, 2, 7, 
+                                 bgcolor=color.new(color.white, 80), 
+                                 border_width=2)
+    
+    // Header
+    table.cell(status_table, 0, 0, "✅ ELLIOTT WAVE v6", 
+               bgcolor=color.new(color.green, 30), 
+               text_color=color.white, text_size=size.large)
+    table.cell(status_table, 1, 0, "Pivot: " + str.tostring(pivot_length), 
+               bgcolor=color.new(color.green, 30), 
+               text_color=color.white, text_size=size.small)
+    
+    // Wave explanations
+    table.cell(status_table, 0, 1, "②④ ORANGE", 
+               bgcolor=color.new(color.orange, 70), 
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 1, "LOW PIVOTS\n(Wave 2, 4)", 
+               text_color=color.black, text_size=size.tiny)
+    
+    table.cell(status_table, 0, 2, "①③⑤ PURPLE", 
+               bgcolor=color.new(color.purple, 70), 
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 2, "HIGH PIVOTS\n(Wave 1, 3, 5)", 
+               text_color=color.black, text_size=size.tiny)
+    
+    // Instructions
+    table.cell(status_table, 0, 3, "🎯 INSTRUCTIONS", 
+               bgcolor=color.new(color.navy, 50), 
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 3, "1. Zoom Out\n2. Scroll Left\n3. Pivot 3-8", 
+               text_color=color.yellow, text_size=size.tiny)
+    
+    // Best timeframes
+    table.cell(status_table, 0, 4, "⏰ BEST TF", 
+               bgcolor=color.new(color.blue, 50), 
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 4, "NIFTY: 15m/1H\nBNF: 5m/15m", 
+               text_color=color.aqua, text_size=size.tiny)
+    
+    // Alerts info
+    table.cell(status_table, 0, 5, "🔔 ALERTS", 
+               bgcolor=color.new(color.maroon, 50), 
+               text_color=color.white, text_size=size.small)
+    table.cell(status_table, 1, 5, "High/Low\nPivot Alerts", 
+               text_color=color.yellow, text_size=size.tiny)
+
+// Alerts
+alertcondition(not na(pivot_high), "Wave 1/3/5 High", "High pivot (①③⑤) detected!")
+alertcondition(not na(pivot_low), "Wave 2/4 Low", "Low pivot (②④) detected!")
+
+// Plot invisible line to force history calculation
+plot(na, title="Force History")
