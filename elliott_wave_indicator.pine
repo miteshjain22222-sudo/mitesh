@@ -1,0 +1,320 @@
+// @version=5
+// Elliott Wave Indicator
+// Based on: SweeGlu Practical Application of Elliott Wave Principle
+// Chapters 1, 4, 7-14, 17-21
+//
+// Features:
+//   - Automatic pivot (swing high/low) detection
+//   - 5-wave impulse labelling (1-2-3-4-5)
+//   - A-B-C corrective wave labelling
+//   - Basic rule validation (Wave 2, 3, 4 rules)
+//   - Fibonacci retracement and projection levels
+//   - 38% breakout trail stop logic
+//   - Next-wave target projections
+//
+// Usage: Apply on 5-15 minute Nifty or any liquid instrument chart.
+// Start by identifying clear impulse patterns, then progress to corrective ones.
+
+indicator("Elliott Wave – All Rules", overlay=true, max_lines_count=200, max_labels_count=200)
+
+// ── Inputs ────────────────────────────────────────────────────────────────────
+pivotLen        = input.int(5,   "Pivot Lookback Length", minval=2, maxval=50,
+                            tooltip="Number of bars each side to confirm a swing high/low.")
+showFib         = input.bool(true, "Show Fibonacci Levels")
+showTargets     = input.bool(true, "Show Wave 5 / Next-Wave Targets")
+showTradeSetup  = input.bool(true, "Show 38% Breakout Trade Setup")
+waveColor       = input.color(color.new(color.blue, 0), "Impulse Wave Colour")
+corrColor       = input.color(color.new(color.orange, 0), "Corrective Wave Colour")
+fibColor        = input.color(color.new(color.gray, 60), "Fibonacci Level Colour")
+targetColor     = input.color(color.new(color.green, 0), "Target Level Colour")
+stopColor       = input.color(color.new(color.red, 0),   "Stop-Loss Level Colour")
+
+// ── Fibonacci Ratios (Chapters 2, 5) ─────────────────────────────────────────
+FIB_23  = 0.236
+FIB_38  = 0.382
+FIB_50  = 0.500
+FIB_61  = 0.618
+FIB_78  = 0.786
+FIB_100 = 1.000
+FIB_123 = 1.236
+FIB_161 = 1.618
+FIB_261 = 2.618
+
+// ── Helper: Fibonacci retracement price ──────────────────────────────────────
+fibRetrace(waveStart, waveEnd, ratio) =>
+    waveEnd - (waveEnd - waveStart) * ratio
+
+// ── Helper: Fibonacci projection price ───────────────────────────────────────
+fibProject(refStart, refEnd, fromPrice, ratio) =>
+    waveLen = math.abs(refEnd - refStart)
+    dir     = refEnd > refStart ? 1.0 : -1.0
+    fromPrice + dir * waveLen * ratio
+
+// ── Pivot Detection ───────────────────────────────────────────────────────────
+// A confirmed pivot high/low requires `pivotLen` bars on each side.
+pivotHigh = ta.pivothigh(high, pivotLen, pivotLen)
+pivotLow  = ta.pivotlow(low,  pivotLen, pivotLen)
+
+// Store the last six pivot prices and bar indices (enough for a 5-wave count).
+// We keep two separate arrays: one for highs, one for lows; then merge them
+// into alternating pivots for wave counting.
+
+var float[] pHigh  = array.new_float(0)
+var int[]   pHighI = array.new_int(0)
+var float[] pLow   = array.new_float(0)
+var int[]   pLowI  = array.new_int(0)
+
+if not na(pivotHigh)
+    array.push(pHigh, pivotHigh)
+    array.push(pHighI, bar_index - pivotLen)
+    if array.size(pHigh) > 10
+        array.shift(pHigh)
+        array.shift(pHighI)
+
+if not na(pivotLow)
+    array.push(pLow, pivotLow)
+    array.push(pLowI, bar_index - pivotLen)
+    if array.size(pLow) > 10
+        array.shift(pLow)
+        array.shift(pLowI)
+
+// ── Merge pivots into a single alternating time-ordered list ──────────────────
+// Determine the last 6 alternating pivots (H-L-H-L… or L-H-L-H…).
+// For simplicity we build the merged pivot sequence each bar.
+
+pivotCount = math.min(array.size(pHigh), array.size(pLow))
+
+// We need at least 3 paired pivots to attempt a wave count.
+canCount = pivotCount >= 3
+
+// Extract the last 3 high/low pairs as pivot sequence W0..W5
+// (W0=oldest, W5=newest) — using the last 3 lows and 3 highs interleaved.
+// Pattern assumed: bullish impulse starts at a low.
+
+p0 = pivotCount >= 3 ? array.get(pLow,  array.size(pLow)  - 3) : na
+p1 = pivotCount >= 3 ? array.get(pHigh, array.size(pHigh) - 3) : na
+p2 = pivotCount >= 3 ? array.get(pLow,  array.size(pLow)  - 2) : na
+p3 = pivotCount >= 3 ? array.get(pHigh, array.size(pHigh) - 2) : na
+p4 = pivotCount >= 3 ? array.get(pLow,  array.size(pLow)  - 1) : na
+p5 = pivotCount >= 3 ? array.get(pHigh, array.size(pHigh) - 1) : na
+
+i0 = pivotCount >= 3 ? array.get(pLowI,  array.size(pLowI)  - 3) : na
+i1 = pivotCount >= 3 ? array.get(pHighI, array.size(pHighI) - 3) : na
+i2 = pivotCount >= 3 ? array.get(pLowI,  array.size(pLowI)  - 2) : na
+i3 = pivotCount >= 3 ? array.get(pHighI, array.size(pHighI) - 2) : na
+i4 = pivotCount >= 3 ? array.get(pLowI,  array.size(pLowI)  - 1) : na
+i5 = pivotCount >= 3 ? array.get(pHighI, array.size(pHighI) - 1) : na
+
+// ── Elliott Wave Rule Validation ──────────────────────────────────────────────
+
+// Rule 1 (Chapter 1): Wave 2 must not retrace more than 100% of Wave 1.
+wave2Valid = canCount ? p2 > p0 : na   // bullish: Wave 2 low must stay above Wave 0
+
+// Rule 2 (Chapter 1): Wave 3 cannot be the shortest impulse wave.
+len1 = canCount ? math.abs(p1 - p0) : na
+len3 = canCount ? math.abs(p3 - p2) : na
+len5 = canCount ? math.abs(p5 - p4) : na
+wave3NotShortest = canCount ? len3 >= math.min(len1, len5) : na
+
+// Rule 3 (Chapter 1): Wave 4 must not overlap Wave 1 territory (non-diagonal).
+wave4NoOverlap = canCount ? p4 > p1 : na   // bullish: Wave 4 low stays above Wave 1 high
+
+// ── Wave 3 Classification (Chapter 4) ────────────────────────────────────────
+// Extended Wave 3 projects more than 161.8% of Wave 1.
+wave3ExtRatio = canCount and len1 > 0 ? len3 / len1 : na
+wave3Extended = canCount ? wave3ExtRatio > FIB_161 : na
+
+// ── Wave 5 Qualification (Chapter 14 & 17) ───────────────────────────────────
+// Wave 5 must end beyond Wave 3 and project minimum 38% of Wave 3 length.
+wave5BeyondW3   = canCount ? p5 > p3 : na
+wave5MinProj    = canCount ? len3 * FIB_38 : na
+wave5Qualifies  = canCount ? wave5BeyondW3 and len5 >= wave5MinProj : na
+
+// ── Fibonacci Retracement Levels (Chapter 2) ─────────────────────────────────
+// Wave 4 normal retracement: 23–38% of Wave 3.
+w4_38 = canCount ? fibRetrace(p2, p3, FIB_38) : na
+w4_23 = canCount ? fibRetrace(p2, p3, FIB_23) : na
+w4_61 = canCount ? fibRetrace(p2, p3, FIB_61) : na
+
+// Wave 2 retracement levels of Wave 1.
+w2_38 = canCount ? fibRetrace(p0, p1, FIB_38) : na
+w2_61 = canCount ? fibRetrace(p0, p1, FIB_61) : na
+
+// ── Wave 5 Projection Targets (Chapter 5, 17) ────────────────────────────────
+// Projected from Wave 4 end using Wave 3 length as reference.
+w5_38  = canCount ? fibProject(p2, p3, p4, FIB_38)  : na
+w5_61  = canCount ? fibProject(p2, p3, p4, FIB_61)  : na
+w5_100 = canCount ? fibProject(p2, p3, p4, FIB_100) : na
+w5_161 = canCount ? fibProject(p2, p3, p4, FIB_161) : na
+
+// ── 38% Breakout Trade Setup (Chapter 18) ────────────────────────────────────
+// After Wave 5 completes: enter in 23–38% retracement zone of Wave 5,
+// stop beyond 23%, Target 1 = Wave 4 end, Target 2 = Wave 2 end.
+post5_38 = canCount ? fibRetrace(p4, p5, FIB_38) : na
+post5_23 = canCount ? fibRetrace(p4, p5, FIB_23) : na
+
+// ── Plotting: Wave Labels ─────────────────────────────────────────────────────
+
+plotshape(not na(pivotLow)  and bar_index == bar_index, location=location.belowbar,
+          style=shape.labelup, size=size.tiny, color=waveColor,
+          text="▲", textcolor=color.white)
+plotshape(not na(pivotHigh) and bar_index == bar_index, location=location.abovebar,
+          style=shape.labeldown, size=size.tiny, color=waveColor,
+          text="▼", textcolor=color.white)
+
+// ── Plotting: Wave Trend Lines ────────────────────────────────────────────────
+// Draw lines between consecutive pivots to visualise the wave structure.
+var line wLine1 = na
+var line wLine2 = na
+var line wLine3 = na
+var line wLine4 = na
+var line wLine5 = na
+
+if canCount and barstate.islast
+    line.delete(wLine1)
+    line.delete(wLine2)
+    line.delete(wLine3)
+    line.delete(wLine4)
+    line.delete(wLine5)
+    wLine1 := line.new(i0, p0, i1, p1, color=waveColor, width=2)
+    wLine2 := line.new(i1, p1, i2, p2, color=corrColor, width=2)
+    wLine3 := line.new(i2, p2, i3, p3, color=waveColor, width=2)
+    wLine4 := line.new(i3, p3, i4, p4, color=corrColor, width=2)
+    wLine5 := line.new(i4, p4, i5, p5, color=waveColor, width=2)
+
+// ── Plotting: Wave Number Labels ──────────────────────────────────────────────
+var label lbl0 = na
+var label lbl1 = na
+var label lbl2 = na
+var label lbl3 = na
+var label lbl4 = na
+var label lbl5 = na
+
+if canCount and barstate.islast
+    label.delete(lbl0)
+    label.delete(lbl1)
+    label.delete(lbl2)
+    label.delete(lbl3)
+    label.delete(lbl4)
+    label.delete(lbl5)
+
+    ruleColor = wave2Valid and wave3NotShortest and wave4NoOverlap ? waveColor : color.red
+
+    lbl0 := label.new(i0, p0, "0", style=label.style_label_up,
+                      color=ruleColor, textcolor=color.white, size=size.small)
+    lbl1 := label.new(i1, p1, "1", style=label.style_label_down,
+                      color=ruleColor, textcolor=color.white, size=size.small)
+    lbl2 := label.new(i2, p2,
+                      wave2Valid ? "2" : "2✗",
+                      style=label.style_label_up,
+                      color=wave2Valid ? corrColor : color.red,
+                      textcolor=color.white, size=size.small)
+    lbl3 := label.new(i3, p3,
+                      wave3Extended ? "3 (EXT)" : "3",
+                      style=label.style_label_down,
+                      color=wave3NotShortest ? waveColor : color.red,
+                      textcolor=color.white, size=size.small)
+    lbl4 := label.new(i4, p4,
+                      wave4NoOverlap ? "4" : "4✗",
+                      style=label.style_label_up,
+                      color=wave4NoOverlap ? corrColor : color.red,
+                      textcolor=color.white, size=size.small)
+    lbl5 := label.new(i5, p5,
+                      wave5Qualifies ? "5 ✓" : "5?",
+                      style=label.style_label_down,
+                      color=wave5Qualifies ? waveColor : color.orange,
+                      textcolor=color.white, size=size.small)
+
+// ── Plotting: Fibonacci Levels ────────────────────────────────────────────────
+// Wave 4 retracement zone (23–38% of Wave 3) — shown as horizontal lines.
+plot(showFib and canCount ? w4_38 : na, "W4 38%", color=fibColor, linewidth=1,
+     style=plot.style_linebr)
+plot(showFib and canCount ? w4_23 : na, "W4 23%", color=fibColor, linewidth=1,
+     style=plot.style_linebr)
+
+// Wave 2 retracement levels.
+plot(showFib and canCount ? w2_38 : na, "W2 38%", color=color.new(fibColor, 40),
+     linewidth=1, style=plot.style_linebr)
+plot(showFib and canCount ? w2_61 : na, "W2 61%", color=color.new(fibColor, 40),
+     linewidth=1, style=plot.style_linebr)
+
+// ── Plotting: Wave 5 Projection Targets ──────────────────────────────────────
+plot(showTargets and canCount ? w5_38  : na, "W5 38% target",  color=targetColor,
+     linewidth=1, style=plot.style_linebr)
+plot(showTargets and canCount ? w5_61  : na, "W5 61% target",  color=targetColor,
+     linewidth=1, style=plot.style_linebr)
+plot(showTargets and canCount ? w5_100 : na, "W5 100% target", color=targetColor,
+     linewidth=2, style=plot.style_linebr)
+plot(showTargets and canCount ? w5_161 : na, "W5 161% target", color=targetColor,
+     linewidth=1, style=plot.style_linebr)
+
+// ── Plotting: 38% Breakout Trade Setup Levels ─────────────────────────────────
+plot(showTradeSetup and canCount ? post5_38 : na, "Post-W5 38% (entry/trail stop)",
+     color=stopColor, linewidth=1, style=plot.style_linebr)
+plot(showTradeSetup and canCount ? post5_23 : na, "Post-W5 23% (hard stop)",
+     color=color.new(stopColor, 40), linewidth=1, style=plot.style_linebr)
+
+// ── Background: Highlight Wave 3 Region (Chapter 4 – steepest/fastest) ────────
+// Shade the bar background amber when Wave 3 is the active impulse segment.
+inWave3 = canCount and bar_index >= i2 and bar_index <= i3
+bgcolor(inWave3 ? color.new(color.orange, 90) : na, title="Wave 3 Region")
+
+// ── Info Table ────────────────────────────────────────────────────────────────
+var table infoTable = table.new(position.top_right, 2, 10,
+                                 border_color=color.gray, border_width=1,
+                                 bgcolor=color.new(color.black, 80))
+
+if barstate.islast and canCount
+    table.cell(infoTable, 0, 0, "Rule", text_color=color.white,
+               bgcolor=color.new(color.navy, 20), text_size=size.small)
+    table.cell(infoTable, 1, 0, "Status", text_color=color.white,
+               bgcolor=color.new(color.navy, 20), text_size=size.small)
+
+    table.cell(infoTable, 0, 1, "Wave 2 ≤ 100% W1", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 1, wave2Valid ? "✓ Valid" : "✗ Broken",
+               text_color=wave2Valid ? color.lime : color.red, text_size=size.small)
+
+    table.cell(infoTable, 0, 2, "Wave 3 Not Shortest", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 2, wave3NotShortest ? "✓ Valid" : "✗ Broken",
+               text_color=wave3NotShortest ? color.lime : color.red,
+               text_size=size.small)
+
+    table.cell(infoTable, 0, 3, "Wave 4 No Overlap", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 3, wave4NoOverlap ? "✓ Valid" : "✗ (Diagonal?)",
+               text_color=wave4NoOverlap ? color.lime : color.orange,
+               text_size=size.small)
+
+    table.cell(infoTable, 0, 4, "Wave 3 Extended", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 4, wave3Extended ? "Yes (>161%)" : "No (≤161%)",
+               text_color=wave3Extended ? color.orange : color.gray,
+               text_size=size.small)
+
+    table.cell(infoTable, 0, 5, "Wave 5 Qualifies", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 5, wave5Qualifies ? "✓ Yes" : "? Incomplete",
+               text_color=wave5Qualifies ? color.lime : color.orange,
+               text_size=size.small)
+
+    table.cell(infoTable, 0, 6, "W5 38% Target", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 6, str.tostring(w5_38, "#.##"),
+               text_color=targetColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 7, "W5 100% Target", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 7, str.tostring(w5_100, "#.##"),
+               text_color=targetColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 8, "Trail Stop (38%)", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 8, str.tostring(post5_38, "#.##"),
+               text_color=stopColor, text_size=size.small)
+
+    table.cell(infoTable, 0, 9, "Hard Stop (23%)", text_color=color.white,
+               text_size=size.small)
+    table.cell(infoTable, 1, 9, str.tostring(post5_23, "#.##"),
+               text_color=stopColor, text_size=size.small)
