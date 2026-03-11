@@ -1,166 +1,247 @@
 //@version=6
-indicator("Elliott Wave Numbers - FINAL v6", overlay=true, max_labels_count=500)
+indicator("Elliott Wave - Full Notation v6", overlay=true, max_labels_count=500)
 
-// Inputs
-pivot_length   = input.int(5,    "Pivot Length",         minval=2, maxval=20)
-show_table     = input.bool(true, "Show Status Table")
-show_forecast  = input.bool(true, "Show 2-Wave Forecast")
-forecast_bars  = input.int(20,   "Forecast Bars Ahead",  minval=5, maxval=200)
+// ── Inputs ────────────────────────────────────────────────────────────────
+pivot_length      = input.int(5,    "Pivot Length",              minval=2,    maxval=20)
+wave_degree       = input.string("Primary", "Wave Degree",
+                                  options=["Supercycle", "Cycle", "Primary", "Intermediate", "Minor"])
+show_table        = input.bool(true,  "Show Status Table")
+show_forecast     = input.bool(true,  "Show 2-Wave Forecast")
+forecast_bars     = input.int(20,   "Forecast Bars Ahead",       minval=5,    maxval=200)
+forecast_lookback = input.int(50,   "Forecast Price Lookback",   minval=10,   maxval=300)
+forecast_step_pct = input.float(0.25, "Forecast Vertical Step %",minval=0.05, maxval=0.75, step=0.05)
 
-// Pivot detection
+// ── Named constants ───────────────────────────────────────────────────────
+COUNTER_MOD       = 4     // Mod divisor for each label counter (4 positions per HIGH/LOW array)
+TABLE_ROWS        = 9     // Number of rows in the status legend table
+TABLE_BG_ALPHA    = 85    // Table background transparency: 0 = fully opaque, 100 = fully transparent (85 = lightly frosted)
+TABLE_BORDER      = 2     // Border width in pixels for the status table
+MIN_RANGE_PCT     = 0.002 // Minimum price-range guard (0.2% of price) to prevent overlapping
+                          //   forecast labels in flat/low-volatility markets
+
+// ── Wave symbol arrays ────────────────────────────────────────────────────
+//
+//  MASTER CYCLE MAPPING (both HIGH and LOW counters use mod COUNTER_MOD):
+//
+//  HIGH pivot positions:  0 = wave 1   1 = wave 3   2 = wave 5   3 = wave B
+//  LOW  pivot positions:  0 = wave 2   1 = wave 4   2 = wave A   3 = wave C
+//
+//  Complete 8-pivot sequence (uptrend example):
+//    LOW②  HIGH①  LOW④  HIGH③  LOW⑥ → HIGH⑤  LOW Ⓐ  HIGH Ⓑ  LOW Ⓒ → repeat
+
+// HIGH label arrays → [wave1, wave3, wave5, waveB]
+var sup_hi = array.from("(I)",  "(III)", "(V)",  "(B)")
+var cyc_hi = array.from("I",    "III",   "V",    "B")
+var pri_hi = array.from("①",   "③",    "⑤",   "Ⓑ")
+var int_hi = array.from("(1)",  "(3)",   "(5)",  "(b)")
+var min_hi = array.from("1",    "3",     "5",    "b")
+
+// LOW label arrays → [wave2, wave4, waveA, waveC]
+var sup_lo = array.from("(II)", "(IV)",  "(A)",  "(C)")
+var cyc_lo = array.from("II",   "IV",    "A",    "C")
+var pri_lo = array.from("②",   "④",    "Ⓐ",   "Ⓒ")
+var int_lo = array.from("(2)",  "(4)",   "(a)",  "(c)")
+var min_lo = array.from("2",    "4",     "a",    "c")
+
+// ── Helpers: return the label string for the active degree ────────────────
+get_hi_lbl(idx) =>
+    arr = wave_degree == "Supercycle"   ? sup_hi :
+          wave_degree == "Cycle"        ? cyc_hi :
+          wave_degree == "Intermediate" ? int_hi :
+          wave_degree == "Minor"        ? min_hi : pri_hi
+    array.get(arr, idx % COUNTER_MOD)
+
+get_lo_lbl(idx) =>
+    arr = wave_degree == "Supercycle"   ? sup_lo :
+          wave_degree == "Cycle"        ? cyc_lo :
+          wave_degree == "Intermediate" ? int_lo :
+          wave_degree == "Minor"        ? min_lo : pri_lo
+    array.get(arr, idx % COUNTER_MOD)
+
+// ── Color helpers ─────────────────────────────────────────────────────────
+// PURPLE  = impulse highs  (cycle positions 0, 1, 2 → waves 1, 3, 5)
+// TEAL    = corrective high (cycle position  3      → wave  B)
+hi_clr(idx) =>
+    (idx % COUNTER_MOD) == 3 ? color.new(color.teal,   0) : color.new(color.purple, 0)
+
+// ORANGE  = impulse lows   (cycle positions 0, 1    → waves 2, 4)
+// RED     = corrective lows (cycle positions 2, 3   → waves A, C)
+lo_clr(idx) =>
+    (idx % COUNTER_MOD) >= 2 ? color.new(color.red, 0) : color.new(color.orange, 0)
+
+// Semi-transparent versions for forecast (ghost) labels
+hi_clr_fc(idx) =>
+    (idx % COUNTER_MOD) == 3 ? color.new(color.teal,   40) : color.new(color.purple, 40)
+
+lo_clr_fc(idx) =>
+    (idx % COUNTER_MOD) >= 2 ? color.new(color.red, 40) : color.new(color.orange, 40)
+
+// ── Label creation helper ─────────────────────────────────────────────────
+make_pivot_label(b_idx, price, lbl, clr, lbl_style) =>
+    label.new(b_idx, price, lbl,
+              color    = clr,
+              style    = lbl_style,
+              size     = size.large,
+              textcolor= color.white)
+
+// ── Wave counters — kept in range [0, COUNTER_MOD) via explicit modulo ─────
+var int hi_idx = 0
+var int lo_idx = 0
+
+// ── Pivot detection ───────────────────────────────────────────────────────
 pivot_high = ta.pivothigh(high, pivot_length, pivot_length)
 pivot_low  = ta.pivotlow(low,  pivot_length, pivot_length)
 
-// Sequential wave counters — each pivot gets ONE individual wave number
-// High pivots cycle through: ① → ③ → ⑤ → ① → ...
-// Low  pivots cycle through: ② → ④ → ② → ...
-var int high_wave_idx = 0
-var int low_wave_idx  = 0
-
-var high_wave_labels = array.from("①", "③", "⑤")
-var low_wave_labels  = array.from("②", "④")
-
-// Track last pivot type and price for forecast
+// ── State tracking for forecast ───────────────────────────────────────────
 var bool  last_was_high   = true
 var float last_pivot_price = close
 
-// Label LOW pivots — individual wave number (② or ④)
+// ── Label LOW pivots ──────────────────────────────────────────────────────
 if not na(pivot_low)
-    lbl = array.get(low_wave_labels, low_wave_idx % array.size(low_wave_labels))
-    label.new(bar_index[pivot_length], low[pivot_length], lbl,
-              color=color.new(color.orange, 0),
-              style=label.style_label_up,
-              size=size.large,
-              textcolor=color.white)
-    low_wave_idx     := low_wave_idx + 1
-    last_was_high    := false
+    make_pivot_label(bar_index[pivot_length], low[pivot_length],
+                     get_lo_lbl(lo_idx), lo_clr(lo_idx), label.style_label_up)
+    lo_idx          := (lo_idx + 1) % COUNTER_MOD
+    last_was_high   := false
     last_pivot_price := low[pivot_length]
 
-// Label HIGH pivots — individual wave number (①, ③, or ⑤)
+// ── Label HIGH pivots ─────────────────────────────────────────────────────
 if not na(pivot_high)
-    lbl = array.get(high_wave_labels, high_wave_idx % array.size(high_wave_labels))
-    label.new(bar_index[pivot_length], high[pivot_length], lbl,
-              color=color.new(color.purple, 0),
-              style=label.style_label_down,
-              size=size.large,
-              textcolor=color.white)
-    high_wave_idx    := high_wave_idx + 1
-    last_was_high    := true
+    make_pivot_label(bar_index[pivot_length], high[pivot_length],
+                     get_hi_lbl(hi_idx), hi_clr(hi_idx), label.style_label_down)
+    hi_idx          := (hi_idx + 1) % COUNTER_MOD
+    last_was_high   := true
     last_pivot_price := high[pivot_length]
 
-// ── 2-Wave Forecast ──────────────────────────────────────────────
-// On the last bar draw 2 dashed labels projected to the right showing
-// the two next expected wave numbers and their likely direction.
-var label forecast_lbl1 = na
-var label forecast_lbl2 = na
+// ── 2-Wave Forecast ───────────────────────────────────────────────────────
+var label fc1 = na
+var label fc2 = na
 
 if barstate.islast and show_forecast
-    // Remove stale forecast labels from the previous bar
-    label.delete(forecast_lbl1)
-    label.delete(forecast_lbl2)
+    label.delete(fc1)
+    label.delete(fc2)
 
-    // Price range over last 50 bars — used to offset forecast prices
-    price_range = ta.highest(high, 50) - ta.lowest(low, 50)
-    step        = price_range * 0.25   // vertical gap per forecast wave
-
-    f1_bar = bar_index + forecast_bars
-    f2_bar = bar_index + forecast_bars * 2
+    // Guard against na when forecast_lookback exceeds available bar history.
+    // Guard against zero range (flat market) using a minimum of 0.2% of price.
+    hi_ref      = nz(ta.highest(high, forecast_lookback), high)
+    lo_ref      = nz(ta.lowest(low,  forecast_lookback), low)
+    price_range = math.max(hi_ref - lo_ref, last_pivot_price * MIN_RANGE_PCT)
+    step        = price_range * forecast_step_pct
 
     if last_was_high
-        // Last confirmed pivot was a HIGH → expect LOW next, then HIGH
-        next1 = array.get(low_wave_labels,  low_wave_idx  % array.size(low_wave_labels))
-        next2 = array.get(high_wave_labels, high_wave_idx % array.size(high_wave_labels))
-        f1_price = last_pivot_price - step
-        f2_price = last_pivot_price
-        forecast_lbl1 := label.new(f1_bar, f1_price,
-                                   "🔮 " + next1 + "\nNext Low",
-                                   color=color.new(color.orange, 30),
-                                   style=label.style_label_up,
-                                   size=size.large,
-                                   textcolor=color.white)
-        forecast_lbl2 := label.new(f2_bar, f2_price,
-                                   "🔮 " + next2 + "\nNext High",
-                                   color=color.new(color.purple, 30),
-                                   style=label.style_label_down,
-                                   size=size.large,
-                                   textcolor=color.white)
+        n1_lbl = get_lo_lbl(lo_idx)
+        n2_lbl = get_hi_lbl(hi_idx)
+        fc1 := label.new(bar_index + forecast_bars,     last_pivot_price - step,
+                         "🔮 " + n1_lbl,
+                         color    = lo_clr_fc(lo_idx),
+                         style    = label.style_label_up,
+                         size     = size.large,
+                         textcolor= color.white)
+        fc2 := label.new(bar_index + forecast_bars * 2, last_pivot_price,
+                         "🔮 " + n2_lbl,
+                         color    = hi_clr_fc(hi_idx),
+                         style    = label.style_label_down,
+                         size     = size.large,
+                         textcolor= color.white)
     else
-        // Last confirmed pivot was a LOW → expect HIGH next, then LOW
-        next1 = array.get(high_wave_labels, high_wave_idx % array.size(high_wave_labels))
-        next2 = array.get(low_wave_labels,  low_wave_idx  % array.size(low_wave_labels))
-        f1_price = last_pivot_price + step
-        f2_price = last_pivot_price
-        forecast_lbl1 := label.new(f1_bar, f1_price,
-                                   "🔮 " + next1 + "\nNext High",
-                                   color=color.new(color.purple, 30),
-                                   style=label.style_label_down,
-                                   size=size.large,
-                                   textcolor=color.white)
-        forecast_lbl2 := label.new(f2_bar, f2_price,
-                                   "🔮 " + next2 + "\nNext Low",
-                                   color=color.new(color.orange, 30),
-                                   style=label.style_label_up,
-                                   size=size.large,
-                                   textcolor=color.white)
+        n1_lbl = get_hi_lbl(hi_idx)
+        n2_lbl = get_lo_lbl(lo_idx)
+        fc1 := label.new(bar_index + forecast_bars,     last_pivot_price + step,
+                         "🔮 " + n1_lbl,
+                         color    = hi_clr_fc(hi_idx),
+                         style    = label.style_label_down,
+                         size     = size.large,
+                         textcolor= color.white)
+        fc2 := label.new(bar_index + forecast_bars * 2, last_pivot_price,
+                         "🔮 " + n2_lbl,
+                         color    = lo_clr_fc(lo_idx),
+                         style    = label.style_label_up,
+                         size     = size.large,
+                         textcolor= color.white)
 
-// Status Table (Top Right)
+// ── Status Table ──────────────────────────────────────────────────────────
+// 'var' ensures the table is created only once (on the first bar where
+// barstate.islast is true), then cells are updated on subsequent repaints.
 if barstate.islast and show_table
-    var status_table = table.new(position.top_right, 2, 7,
-                                 bgcolor=color.new(color.white, 80),
-                                 border_width=2)
+    var t = table.new(position.top_right, 2, TABLE_ROWS,
+                      bgcolor     = color.new(color.white, TABLE_BG_ALPHA),
+                      border_width= TABLE_BORDER)
 
-    // Header
-    table.cell(status_table, 0, 0, "✅ ELLIOTT WAVE v6",
-               bgcolor=color.new(color.green, 30),
-               text_color=color.white, text_size=size.large)
-    table.cell(status_table, 1, 0, "Pivot: " + str.tostring(pivot_length),
-               bgcolor=color.new(color.green, 30),
-               text_color=color.white, text_size=size.small)
+    // Row 0 — header
+    table.cell(t, 0, 0, "ELLIOTT WAVE",
+               bgcolor    = color.new(color.green, 30),
+               text_color = color.white, text_size = size.large)
+    table.cell(t, 1, 0, wave_degree + " | P:" + str.tostring(pivot_length),
+               bgcolor    = color.new(color.green, 30),
+               text_color = color.white, text_size = size.small)
 
-    // Wave explanations
-    table.cell(status_table, 0, 1, "② ④ ORANGE",
-               bgcolor=color.new(color.orange, 70),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 1, "LOW PIVOTS\n(Wave 2, 4)",
-               text_color=color.black, text_size=size.tiny)
+    // Row 1 — impulse highs (waves 1, 3, 5)
+    d_w1 = get_hi_lbl(0)
+    d_w3 = get_hi_lbl(1)
+    d_w5 = get_hi_lbl(2)
+    table.cell(t, 0, 1, d_w1 + " " + d_w3 + " " + d_w5 + " PURPLE",
+               bgcolor    = color.new(color.purple, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 1, "IMPULSE HIGH\nWaves 1, 3, 5",
+               text_color = color.black, text_size = size.tiny)
 
-    table.cell(status_table, 0, 2, "① ③ ⑤ PURPLE",
-               bgcolor=color.new(color.purple, 70),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 2, "HIGH PIVOTS\n(Wave 1, 3, 5)",
-               text_color=color.black, text_size=size.tiny)
+    // Row 2 — impulse lows (waves 2, 4)
+    d_w2 = get_lo_lbl(0)
+    d_w4 = get_lo_lbl(1)
+    table.cell(t, 0, 2, d_w2 + " " + d_w4 + " ORANGE",
+               bgcolor    = color.new(color.orange, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 2, "IMPULSE LOW\nWaves 2, 4",
+               text_color = color.black, text_size = size.tiny)
 
-    // Forecast row
-    table.cell(status_table, 0, 3, "🔮 FORECAST",
-               bgcolor=color.new(color.teal, 50),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 3, "Next 2 Waves\nProjected Right",
-               text_color=color.white, text_size=size.tiny)
+    // Row 3 — corrective lows (waves A, C)
+    d_wA = get_lo_lbl(2)
+    d_wC = get_lo_lbl(3)
+    table.cell(t, 0, 3, d_wA + " " + d_wC + " RED",
+               bgcolor    = color.new(color.red, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 3, "CORRECTIVE LOW\nWaves A, C",
+               text_color = color.black, text_size = size.tiny)
 
-    // Instructions
-    table.cell(status_table, 0, 4, "🎯 INSTRUCTIONS",
-               bgcolor=color.new(color.navy, 50),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 4, "1. Zoom Out\n2. Scroll Left\n3. Pivot 3-8",
-               text_color=color.yellow, text_size=size.tiny)
+    // Row 4 — corrective high (wave B)
+    d_wB = get_hi_lbl(3)
+    table.cell(t, 0, 4, d_wB + " TEAL",
+               bgcolor    = color.new(color.teal, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 4, "CORRECTIVE HIGH\nWave B",
+               text_color = color.black, text_size = size.tiny)
 
-    // Best timeframes
-    table.cell(status_table, 0, 5, "⏰ BEST TF",
-               bgcolor=color.new(color.blue, 50),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 5, "NIFTY: 15m/1H\nBNF: 5m/15m",
-               text_color=color.aqua, text_size=size.tiny)
+    // Row 5 — forecast
+    table.cell(t, 0, 5, "🔮 FORECAST",
+               bgcolor    = color.new(color.navy, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 5, "Next 2 Waves\nProjected →",
+               text_color = color.white, text_size = size.tiny)
 
-    // Alerts info
-    table.cell(status_table, 0, 6, "🔔 ALERTS",
-               bgcolor=color.new(color.maroon, 50),
-               text_color=color.white, text_size=size.small)
-    table.cell(status_table, 1, 6, "High/Low\nPivot Alerts",
-               text_color=color.yellow, text_size=size.tiny)
+    // Row 6 — best timeframes
+    table.cell(t, 0, 6, "⏰ BEST TF",
+               bgcolor    = color.new(color.blue, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 6, "NIFTY: 15m/1H\nBNF: 5m/15m",
+               text_color = color.aqua, text_size = size.tiny)
 
-// Alerts
-alertcondition(not na(pivot_high), "Wave High Pivot", "High pivot (① ③ ⑤) detected!")
-alertcondition(not na(pivot_low),  "Wave Low Pivot",  "Low pivot (② ④) detected!")
+    // Row 7 — tips
+    table.cell(t, 0, 7, "🎯 TIPS",
+               bgcolor    = color.new(color.navy, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 7, "Zoom Out\nPivot 3-8",
+               text_color = color.yellow, text_size = size.tiny)
 
-// Plot invisible line to force history calculation
+    // Row 8 — alerts
+    table.cell(t, 0, 8, "🔔 ALERTS",
+               bgcolor    = color.new(color.maroon, 50),
+               text_color = color.white, text_size = size.small)
+    table.cell(t, 1, 8, "High/Low\nPivot Alerts",
+               text_color = color.yellow, text_size = size.tiny)
+
+// ── Alerts ────────────────────────────────────────────────────────────────
+alertcondition(not na(pivot_high), "Wave High Pivot", "High pivot detected!")
+alertcondition(not na(pivot_low),  "Wave Low Pivot",  "Low pivot detected!")
+
+// This invisible plot is kept for backward compatibility with older Pine Script
+// environments that required at least one plot call to force full history loading.
 plot(na, title="Force History")
