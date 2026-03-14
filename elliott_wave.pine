@@ -2,22 +2,53 @@
 indicator("Elliott Wave - Full Notation v6", overlay=true, max_labels_count=500)
 
 // ── Inputs ────────────────────────────────────────────────────────────────
-pivot_length      = input.int(5,    "Pivot Length",              minval=2,    maxval=20)
-wave_degree       = input.string("Primary", "Wave Degree",
+pivot_length      = input.int(5,       "Pivot Length",              minval=2,    maxval=20)
+degree_mode       = input.string("Auto (by Timeframe)", "Wave Degree Mode",
+                                  options=["Auto (by Timeframe)", "Manual"])
+wave_degree       = input.string("Primary", "Wave Degree (Manual only)",
                                   options=["Supercycle", "Cycle", "Primary", "Intermediate", "Minor"])
-show_table        = input.bool(true,  "Show Status Table")
-show_forecast     = input.bool(true,  "Show 2-Wave Forecast")
-forecast_bars     = input.int(20,   "Forecast Bars Ahead",       minval=5,    maxval=200)
-forecast_lookback = input.int(50,   "Forecast Price Lookback",   minval=10,   maxval=300)
-forecast_step_pct = input.float(0.25, "Forecast Vertical Step %",minval=0.05, maxval=0.75, step=0.05)
+show_table        = input.bool(true,   "Show Status Table")
+show_forecast     = input.bool(true,   "Show 2-Wave Forecast")
+forecast_bars     = input.int(20,      "Forecast Bars Ahead",       minval=5,    maxval=200)
+forecast_lookback = input.int(50,      "Forecast Price Lookback",   minval=10,   maxval=300)
+forecast_step_pct = input.float(0.25,  "Forecast Vertical Step %",  minval=0.05, maxval=0.75, step=0.05)
 
 // ── Named constants ───────────────────────────────────────────────────────
-COUNTER_MOD       = 4     // Mod divisor for each label counter (4 positions per HIGH/LOW array)
-TABLE_ROWS        = 9     // Number of rows in the status legend table
-TABLE_BG_ALPHA    = 85    // Table background transparency: 0 = fully opaque, 100 = fully transparent (85 = lightly frosted)
-TABLE_BORDER      = 2     // Border width in pixels for the status table
-MIN_RANGE_PCT     = 0.002 // Minimum price-range guard (0.2% of price) to prevent overlapping
-                          //   forecast labels in flat/low-volatility markets
+COUNTER_MOD    = 4     // Mod divisor for each label counter (4 positions per HIGH/LOW array)
+TABLE_ROWS     = 9     // Number of rows in the status legend table
+TABLE_BG_ALPHA = 85    // Table background transparency: 0 = fully opaque, 100 = fully transparent
+TABLE_BORDER   = 2     // Border width in pixels for the status table
+MIN_RANGE_PCT  = 0.002 // Minimum price-range guard (0.2% of price) — prevents overlapping
+                       //   forecast labels in flat/low-volatility markets
+
+// ── Auto wave-degree from current chart timeframe ─────────────────────────
+//
+//  Mapping  (timeframe.in_seconds() boundaries):
+//    >= 604800 s  → Weekly / Monthly  → Supercycle   (I)(III)(V) / (II)(IV)(A)(C)
+//    >= 86400  s  → Daily / 3D        → Cycle         I  III  V  /  II  IV  A  C
+//    >= 7200   s  → 2H – 4H           → Primary       ① ③ ⑤    /  ② ④ Ⓐ Ⓒ
+//    >= 1800   s  → 30m – 1H          → Intermediate (1)(3)(5)   / (2)(4)(a)(c)
+//    <  1800   s  → < 30m             → Minor         1  3  5    /  2  4  a  c
+//
+tf_sec = timeframe.in_seconds()
+auto_degree = tf_sec >= 604800 ? "Supercycle"   :
+              tf_sec >= 86400  ? "Cycle"         :
+              tf_sec >= 7200   ? "Primary"       :
+              tf_sec >= 1800   ? "Intermediate"  : "Minor"
+
+// Active degree used by all label/colour helpers
+active_degree = degree_mode == "Auto (by Timeframe)" ? auto_degree : wave_degree
+
+// Human-readable TF string for the status table header
+tf_name = tf_sec >= 2592000 ? "Monthly" :
+          tf_sec >= 604800  ? "Weekly"  :
+          tf_sec >= 86400   ? "Daily"   :
+          tf_sec >= 14400   ? "4H"      :
+          tf_sec >= 7200    ? "2H"      :
+          tf_sec >= 3600    ? "1H"      :
+          tf_sec >= 1800    ? "30m"     :
+          tf_sec >= 900     ? "15m"     :
+          tf_sec >= 300     ? "5m"      : "1m"
 
 // ── Wave symbol arrays ────────────────────────────────────────────────────
 //
@@ -27,7 +58,7 @@ MIN_RANGE_PCT     = 0.002 // Minimum price-range guard (0.2% of price) to preven
 //  LOW  pivot positions:  0 = wave 2   1 = wave 4   2 = wave A   3 = wave C
 //
 //  Complete 8-pivot sequence (uptrend example):
-//    LOW②  HIGH①  LOW④  HIGH③  LOW⑥ → HIGH⑤  LOW Ⓐ  HIGH Ⓑ  LOW Ⓒ → repeat
+//    LOW②  HIGH①  LOW④  HIGH③  HIGH⑤  LOW Ⓐ  HIGH Ⓑ  LOW Ⓒ → repeat
 
 // HIGH label arrays → [wave1, wave3, wave5, waveB]
 var sup_hi = array.from("(I)",  "(III)", "(V)",  "(B)")
@@ -45,17 +76,17 @@ var min_lo = array.from("2",    "4",     "a",    "c")
 
 // ── Helpers: return the label string for the active degree ────────────────
 get_hi_lbl(idx) =>
-    arr = wave_degree == "Supercycle"   ? sup_hi :
-          wave_degree == "Cycle"        ? cyc_hi :
-          wave_degree == "Intermediate" ? int_hi :
-          wave_degree == "Minor"        ? min_hi : pri_hi
+    arr = active_degree == "Supercycle"   ? sup_hi :
+          active_degree == "Cycle"        ? cyc_hi :
+          active_degree == "Intermediate" ? int_hi :
+          active_degree == "Minor"        ? min_hi : pri_hi
     array.get(arr, idx % COUNTER_MOD)
 
 get_lo_lbl(idx) =>
-    arr = wave_degree == "Supercycle"   ? sup_lo :
-          wave_degree == "Cycle"        ? cyc_lo :
-          wave_degree == "Intermediate" ? int_lo :
-          wave_degree == "Minor"        ? min_lo : pri_lo
+    arr = active_degree == "Supercycle"   ? sup_lo :
+          active_degree == "Cycle"        ? cyc_lo :
+          active_degree == "Intermediate" ? int_lo :
+          active_degree == "Minor"        ? min_lo : pri_lo
     array.get(arr, idx % COUNTER_MOD)
 
 // ── Color helpers ─────────────────────────────────────────────────────────
@@ -93,7 +124,7 @@ pivot_high = ta.pivothigh(high, pivot_length, pivot_length)
 pivot_low  = ta.pivotlow(low,  pivot_length, pivot_length)
 
 // ── State tracking for forecast ───────────────────────────────────────────
-var bool  last_was_high   = true
+var bool  last_was_high    = true
 var float last_pivot_price = close
 
 // ── Label LOW pivots ──────────────────────────────────────────────────────
@@ -166,11 +197,13 @@ if barstate.islast and show_table
                       bgcolor     = color.new(color.white, TABLE_BG_ALPHA),
                       border_width= TABLE_BORDER)
 
-    // Row 0 — header
+    // Row 0 — header: shows TF, detected degree, and whether mode is Auto/Manual
+    mode_tag   = degree_mode == "Auto (by Timeframe)" ? "AUTO" : "MANUAL"
+    header_txt = tf_name + " → " + active_degree + " [" + mode_tag + "]"
     table.cell(t, 0, 0, "ELLIOTT WAVE",
                bgcolor    = color.new(color.green, 30),
                text_color = color.white, text_size = size.large)
-    table.cell(t, 1, 0, wave_degree + " | P:" + str.tostring(pivot_length),
+    table.cell(t, 1, 0, header_txt,
                bgcolor    = color.new(color.green, 30),
                text_color = color.white, text_size = size.small)
 
@@ -217,11 +250,11 @@ if barstate.islast and show_table
     table.cell(t, 1, 5, "Next 2 Waves\nProjected →",
                text_color = color.white, text_size = size.tiny)
 
-    // Row 6 — best timeframes
-    table.cell(t, 0, 6, "⏰ BEST TF",
+    // Row 6 — TF degree guide
+    table.cell(t, 0, 6, "📐 TF → DEGREE",
                bgcolor    = color.new(color.blue, 50),
                text_color = color.white, text_size = size.small)
-    table.cell(t, 1, 6, "NIFTY: 15m/1H\nBNF: 5m/15m",
+    table.cell(t, 1, 6, "W/M→SC  D→CY\n4H→PR  1H→IN  <30m→MN",
                text_color = color.aqua, text_size = size.tiny)
 
     // Row 7 — tips
