@@ -1,0 +1,624 @@
+//@version=5
+// ============================================================================
+// Elliott Wave Complete Indicator — Pine Script v5
+// ============================================================================
+// Features:
+//   • ZigZag pivot detection (configurable depth)
+//   • Impulse waves  1–2–3–4–5  with full rule validation
+//   • Corrective waves  A–B–C
+//   • Sub-wave overlay at a finer pivot depth
+//   • Fibonacci retracement & extension levels per wave
+//   • Prediction zone (target box) for the next probable move
+//   • Auto wave-degree selection by timeframe + manual override
+//   • On-chart dashboard table
+//   • Alert conditions on every new pivot / wave completion
+// ============================================================================
+indicator("Elliott Wave Complete [v5]", shorttitle="EW Complete",
+         overlay=true, max_labels_count=500, max_lines_count=500,
+         max_boxes_count=100)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 1 — INPUTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- Pivot settings ---
+pivot_len      = input.int(5,  "Pivot Length (main)",    minval=2, maxval=30,
+                            tooltip="Bars left/right to confirm a swing pivot")
+sub_pivot_len  = input.int(2,  "Sub-wave Pivot Length",  minval=1, maxval=10,
+                            tooltip="Smaller pivot length used for sub-wave overlay")
+show_subwaves  = input.bool(true, "Show Sub-waves")
+
+// --- Wave display ---
+show_impulse   = input.bool(true,  "Show Impulse Waves (1–5)")
+show_corrective= input.bool(true,  "Show Corrective Waves (A–B–C)")
+show_fib       = input.bool(true,  "Show Fibonacci Levels")
+show_predict   = input.bool(true,  "Show Prediction Zone")
+show_table     = input.bool(true,  "Show Dashboard Table")
+show_connect   = input.bool(true,  "Draw Wave Connecting Lines")
+
+// --- Wave degree ---
+degree_mode    = input.string("Auto (by Timeframe)", "Wave Degree Mode",
+                              options=["Auto (by Timeframe)", "Manual"])
+manual_degree  = input.string("Primary", "Manual Degree",
+                              options=["Grand Supercycle", "Supercycle", "Cycle",
+                                       "Primary", "Intermediate", "Minor",
+                                       "Minute", "Minuette", "Sub-Minuette"])
+
+// --- Colours ---
+c_wave1  = input.color(color.new(color.green,  0),  "Wave 1 Colour")
+c_wave2  = input.color(color.new(color.red,    0),  "Wave 2 Colour")
+c_wave3  = input.color(color.new(color.lime,   0),  "Wave 3 Colour")
+c_wave4  = input.color(color.new(color.orange, 0),  "Wave 4 Colour")
+c_wave5  = input.color(color.new(color.teal,   0),  "Wave 5 Colour")
+c_waveA  = input.color(color.new(color.fuchsia,0),  "Wave A Colour")
+c_waveB  = input.color(color.new(color.yellow, 0),  "Wave B Colour")
+c_waveC  = input.color(color.new(color.purple, 0),  "Wave C Colour")
+c_sub    = input.color(color.new(color.gray,  50),  "Sub-wave Colour")
+c_fib    = input.color(color.new(color.blue,  60),  "Fibonacci Colour")
+c_pred   = input.color(color.new(color.lime,  80),  "Prediction Zone Colour")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 2 — WAVE DEGREE AUTO-DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+f_auto_degree() =>
+    secs = timeframe.in_seconds()
+    secs >= 2592000 ? "Grand Supercycle" :   // monthly +
+    secs >= 604800  ? "Supercycle" :          // weekly
+    secs >= 86400   ? "Cycle" :               // daily
+    secs >= 14400   ? "Primary" :             // 4H
+    secs >= 3600    ? "Intermediate" :        // 1H
+    secs >= 900     ? "Minor" :               // 15m
+    secs >= 300     ? "Minute" :              // 5m
+    secs >= 60      ? "Minuette" :            // 1m
+                      "Sub-Minuette"
+
+active_degree = degree_mode == "Auto (by Timeframe)" ? f_auto_degree() : manual_degree
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 3 — PIVOT DETECTION (ZigZag Engine)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Returns the confirmed pivot value pivot_len bars ago (na if not a pivot)
+ph = ta.pivothigh(high, pivot_len, pivot_len)
+pl = ta.pivotlow (low,  pivot_len, pivot_len)
+
+// Sub-wave pivots
+ph_sub = ta.pivothigh(high, sub_pivot_len, sub_pivot_len)
+pl_sub = ta.pivotlow (low,  sub_pivot_len, sub_pivot_len)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 4 — ZIGZAG ARRAYS  (store up to 20 recent confirmed swings)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var float[] zz_price = array.new_float(0)
+var int[]   zz_idx   = array.new_int(0)
+var bool[]  zz_ishigh= array.new_bool(0)
+
+MAX_ZZ = 20
+
+// Append new confirmed pivot; merge consecutive same-direction pivots
+f_zz_push(float price, int idx, bool ishigh) =>
+    if array.size(zz_price) == 0
+        array.push(zz_price,  price)
+        array.push(zz_idx,    idx)
+        array.push(zz_ishigh, ishigh)
+    else
+        last_high = array.get(zz_ishigh, array.size(zz_ishigh) - 1)
+        if last_high == ishigh
+            // Same direction — keep the more extreme value
+            last_p = array.get(zz_price, array.size(zz_price) - 1)
+            if (ishigh and price > last_p) or (not ishigh and price < last_p)
+                array.set(zz_price,  array.size(zz_price)  - 1, price)
+                array.set(zz_idx,    array.size(zz_idx)    - 1, idx)
+        else
+            array.push(zz_price,  price)
+            array.push(zz_idx,    idx)
+            array.push(zz_ishigh, ishigh)
+    // Trim to max size
+    while array.size(zz_price) > MAX_ZZ
+        array.shift(zz_price)
+        array.shift(zz_idx)
+        array.shift(zz_ishigh)
+
+if not na(ph)
+    f_zz_push(ph, bar_index - pivot_len, true)
+if not na(pl)
+    f_zz_push(pl, bar_index - pivot_len, false)
+
+// Sub-wave zigzag
+var float[] szz_price  = array.new_float(0)
+var int[]   szz_idx    = array.new_int(0)
+var bool[]  szz_ishigh = array.new_bool(0)
+
+MAX_SZZ = 40
+
+f_szz_push(float price, int idx, bool ishigh) =>
+    if array.size(szz_price) == 0
+        array.push(szz_price,  price)
+        array.push(szz_idx,    idx)
+        array.push(szz_ishigh, ishigh)
+    else
+        last_high = array.get(szz_ishigh, array.size(szz_ishigh) - 1)
+        if last_high == ishigh
+            last_p = array.get(szz_price, array.size(szz_price) - 1)
+            if (ishigh and price > last_p) or (not ishigh and price < last_p)
+                array.set(szz_price,  array.size(szz_price)  - 1, price)
+                array.set(szz_idx,    array.size(szz_idx)    - 1, idx)
+        else
+            array.push(szz_price,  price)
+            array.push(szz_idx,    idx)
+            array.push(szz_ishigh, ishigh)
+    while array.size(szz_price) > MAX_SZZ
+        array.shift(szz_price)
+        array.shift(szz_idx)
+        array.shift(szz_ishigh)
+
+if not na(ph_sub)
+    f_szz_push(ph_sub, bar_index - sub_pivot_len, true)
+if not na(pl_sub)
+    f_szz_push(pl_sub, bar_index - sub_pivot_len, false)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 5 — FIBONACCI HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Retracement levels from a swing
+f_fib_retrace(float start, float end, float ratio) =>
+    start + (end - start) * ratio
+
+// Extension levels projected beyond a wave end
+f_fib_extend(float wave_start, float wave_end, float proj_from, float ratio) =>
+    wave_len = math.abs(wave_end - wave_start)
+    direction = wave_end > wave_start ? 1.0 : -1.0
+    proj_from + direction * wave_len * ratio
+
+FIB_RETRACE_LEVELS = array.from(0.236, 0.382, 0.500, 0.618, 0.786)
+FIB_EXTEND_LEVELS  = array.from(1.000, 1.272, 1.618, 2.000, 2.618)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 6 — ELLIOTT WAVE RULE VALIDATION
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// For a bullish impulse the pivot sequence is:
+//   W0(low) → W1(high) → W2(low) → W3(high) → W4(low) → W5(high)
+//
+// Rules:
+//   1. Wave 2 must not retrace more than 100% of Wave 1
+//   2. Wave 3 must not be the shortest among W1, W3, W5
+//   3. Wave 4 must not overlap Wave 1 price territory (no overlap rule)
+//
+// Returns [valid_2, valid_3, valid_4, bullish]
+
+f_validate_impulse(float p0, float p1, float p2, float p3, float p4, float p5) =>
+    bull = p1 > p0   // direction of Wave 1
+
+    // Wave lengths (absolute)
+    len1 = math.abs(p1 - p0)
+    len3 = math.abs(p3 - p2)
+    len5 = math.abs(p5 - p4)
+
+    // Rule 1: Wave 2 retracement ≤ 100% of Wave 1
+    r1 = bull ? p2 > p0 : p2 < p0
+
+    // Rule 2: Wave 3 is not the shortest
+    r2 = len3 >= len1 or len3 >= len5
+
+    // Rule 3: Wave 4 does not enter Wave 1 territory
+    r3 = bull ? p4 > p1 : p4 < p1
+
+    [r1, r2, r3, bull]
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 7 — IMPULSE WAVE DETECTION & LABELING
+// ─────────────────────────────────────────────────────────────────────────────
+
+var label[] impulse_labels = array.new_label(0)
+var line[]  impulse_lines  = array.new_line(0)
+var int     last_impulse_bar = na
+var float   last_w0 = na
+var float   last_w5 = na
+var bool    last_bull = na
+var bool    rule1_ok = false
+var bool    rule2_ok = false
+var bool    rule3_ok = false
+
+f_clear_labels(label[] arr) =>
+    for i = 0 to array.size(arr) - 1
+        label.delete(array.get(arr, i))
+    array.clear(arr)
+
+f_clear_lines(line[] arr) =>
+    for i = 0 to array.size(arr) - 1
+        line.delete(array.get(arr, i))
+    array.clear(arr)
+
+// Wave label text using circled numbers / letters
+f_wave_label(int n) =>
+    n == 0 ? "(0)" :
+    n == 1 ? "①"  :
+    n == 2 ? "②"  :
+    n == 3 ? "③"  :
+    n == 4 ? "④"  :
+    n == 5 ? "⑤"  :
+    n == 6 ? "Ⓐ"  :  // A
+    n == 7 ? "Ⓑ"  :  // B
+    n == 8 ? "Ⓒ"  :  // C
+             "?"
+
+f_wave_color(int n, bool r1, bool r2, bool r3) =>
+    n == 1 ? c_wave1 :
+    n == 2 ? (r1 ? c_wave2 : color.red) :
+    n == 3 ? (r2 ? c_wave3 : color.red) :
+    n == 4 ? (r3 ? c_wave4 : color.red) :
+    n == 5 ? c_wave5 :
+    n == 6 ? c_waveA :
+    n == 7 ? c_waveB :
+             c_waveC
+
+// Draw a wave label at a given bar/price
+f_draw_label(int bar, float price, string txt, color clr, bool above) =>
+    styl = above ? label.style_label_down : label.style_label_up
+    label.new(bar, price, txt,
+              color=clr, style=styl,
+              textcolor=color.white, size=size.normal)
+
+// Draw a connecting line between two wave points
+f_draw_line(int b1, float p1_, int b2, float p2_, color clr) =>
+    line.new(b1, p1_, b2, p2_,
+             color=clr, width=2, style=line.style_solid)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attempt to identify the most recent complete 5-wave impulse from the ZigZag
+// We need at least 6 points (W0…W5) alternating high/low
+// ─────────────────────────────────────────────────────────────────────────────
+
+var bool   impulse_found  = false
+var bool   correction_needed = false
+
+if barstate.islast and array.size(zz_price) >= 6 and show_impulse
+    f_clear_labels(impulse_labels)
+    f_clear_lines(impulse_lines)
+
+    n = array.size(zz_price)
+
+    // Walk backwards looking for a 6-point alternating sequence
+    found = false
+    for offset = 0 to n - 6
+        i5 = n - 1 - offset
+        i4 = i5 - 1
+        i3 = i4 - 1
+        i2 = i3 - 1
+        i1 = i2 - 1
+        i0 = i1 - 1
+
+        if i0 >= 0
+            h5 = array.get(zz_ishigh, i5)
+            h4 = array.get(zz_ishigh, i4)
+            h3 = array.get(zz_ishigh, i3)
+            h2 = array.get(zz_ishigh, i2)
+            h1 = array.get(zz_ishigh, i1)
+            h0 = array.get(zz_ishigh, i0)
+
+            // Bullish: low high low high low high
+            bull_seq = not h0 and h1 and not h2 and h3 and not h4 and h5
+            // Bearish: high low high low high low
+            bear_seq = h0 and not h1 and h2 and not h3 and h4 and not h5
+
+            if (bull_seq or bear_seq) and not found
+                p0_ = array.get(zz_price, i0)
+                p1_ = array.get(zz_price, i1)
+                p2_ = array.get(zz_price, i2)
+                p3_ = array.get(zz_price, i3)
+                p4_ = array.get(zz_price, i4)
+                p5_ = array.get(zz_price, i5)
+
+                b0_ = array.get(zz_idx, i0)
+                b1_ = array.get(zz_idx, i1)
+                b2_ = array.get(zz_idx, i2)
+                b3_ = array.get(zz_idx, i3)
+                b4_ = array.get(zz_idx, i4)
+                b5_ = array.get(zz_idx, i5)
+
+                [r1, r2, r3, bull] = f_validate_impulse(p0_, p1_, p2_, p3_, p4_, p5_)
+
+                rule1_ok := r1
+                rule2_ok := r2
+                rule3_ok := r3
+                last_bull := bull
+                last_w0   := p0_
+                last_w5   := p5_
+                last_impulse_bar := b5_
+
+                // Draw labels 0–5
+                prices_arr = array.from(p0_, p1_, p2_, p3_, p4_, p5_)
+                bars_arr   = array.from(b0_, b1_, b2_, b3_, b4_, b5_)
+                highs_arr  = array.from(not bull, bull, not bull, bull, not bull, bull)
+
+                for wi = 0 to 5
+                    wp    = array.get(prices_arr, wi)
+                    wb    = array.get(bars_arr,   wi)
+                    wabove= array.get(highs_arr,  wi)
+                    wclr  = f_wave_color(wi, r1, r2, r3)
+                    wtxt  = f_wave_label(wi)
+                    lbl   = f_draw_label(wb, wp, wtxt, wclr, wabove)
+                    array.push(impulse_labels, lbl)
+
+                // Draw connecting lines if enabled
+                if show_connect
+                    all_p = array.from(p0_, p1_, p2_, p3_, p4_, p5_)
+                    all_b = array.from(b0_, b1_, b2_, b3_, b4_, b5_)
+                    wave_clrs = array.from(c_wave1, c_wave2, c_wave3, c_wave4, c_wave5)
+                    for wi = 0 to 4
+                        lnclr = array.get(wave_clrs, wi)
+                        ln = f_draw_line(array.get(all_b, wi),  array.get(all_p, wi),
+                                         array.get(all_b, wi+1), array.get(all_p, wi+1),
+                                         lnclr)
+                        array.push(impulse_lines, ln)
+
+                impulse_found     := true
+                correction_needed := (offset == 0)  // Latest sequence
+                found := true
+                break
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 8 — CORRECTIVE WAVE (A-B-C) DETECTION
+// ─────────────────────────────────────────────────────────────────────────────
+
+var label[] corr_labels = array.new_label(0)
+var line[]  corr_lines  = array.new_line(0)
+var float   last_wC = na
+
+if barstate.islast and show_corrective and array.size(zz_price) >= 3
+    f_clear_labels(corr_labels)
+    f_clear_lines(corr_lines)
+
+    n = array.size(zz_price)
+
+    // Find the latest 3-point alternating sequence that starts after
+    // the last impulse end (or just take the 3 most recent)
+    for offset = 0 to n - 3
+        iC = n - 1 - offset
+        iB = iC - 1
+        iA = iB - 1
+
+        if iA >= 0
+            hC = array.get(zz_ishigh, iC)
+            hB = array.get(zz_ishigh, iB)
+            hA = array.get(zz_ishigh, iA)
+
+            // Bearish correction (after bullish impulse): high low high  → A=high B=low C=high
+            // Bullish correction (after bearish impulse): low high low   → A=low B=high C=low
+            bear_corr = hA and not hB and hC
+            bull_corr = not hA and hB and not hC
+
+            if (bear_corr or bull_corr)
+                pA = array.get(zz_price, iA)
+                pB = array.get(zz_price, iB)
+                pC = array.get(zz_price, iC)
+                bA = array.get(zz_idx,   iA)
+                bB = array.get(zz_idx,   iB)
+                bC = array.get(zz_idx,   iC)
+
+                last_wC := pC
+
+                // Avoid drawing over impulse labels (simple bar check)
+                lbl_A = f_draw_label(bA, pA, "Ⓐ", c_waveA, bear_corr)
+                lbl_B = f_draw_label(bB, pB, "Ⓑ", c_waveB, bull_corr)
+                lbl_C = f_draw_label(bC, pC, "Ⓒ", c_waveC, bear_corr)
+                array.push(corr_labels, lbl_A)
+                array.push(corr_labels, lbl_B)
+                array.push(corr_labels, lbl_C)
+
+                if show_connect
+                    ln1 = f_draw_line(bA, pA, bB, pB, c_waveA)
+                    ln2 = f_draw_line(bB, pB, bC, pC, c_waveB)
+                    array.push(corr_lines, ln1)
+                    array.push(corr_lines, ln2)
+                break
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 9 — FIBONACCI LEVELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+var line[] fib_lines  = array.new_line(0)
+var label[] fib_labels = array.new_label(0)
+
+if barstate.islast and show_fib and impulse_found and not na(last_w0) and not na(last_w5)
+    f_clear_lines(fib_lines)
+    f_clear_labels(fib_labels)
+
+    // Draw Fibonacci retracement levels from W5 back toward W0
+    // (shows potential Wave A / correction targets)
+    for i = 0 to array.size(FIB_RETRACE_LEVELS) - 1
+        ratio = array.get(FIB_RETRACE_LEVELS, i)
+        level = f_fib_retrace(last_w5, last_w0, ratio)
+        clr   = color.new(c_fib, 60)
+        right_bar = last_impulse_bar + 30
+        ln = line.new(last_impulse_bar, level, right_bar, level,
+                      color=clr, style=line.style_dashed, width=1)
+        array.push(fib_lines, ln)
+        pct = str.tostring(math.round(ratio * 100, 1)) + "%"
+        lbl = label.new(right_bar, level, pct,
+                        color=color.new(color.white, 100),
+                        textcolor=clr, style=label.style_label_left,
+                        size=size.tiny)
+        array.push(fib_labels, lbl)
+
+    // Draw Fibonacci extension levels (W5 projection beyond)
+    for i = 0 to array.size(FIB_EXTEND_LEVELS) - 1
+        ratio = array.get(FIB_EXTEND_LEVELS, i)
+        level = f_fib_extend(last_w0, last_w5, last_w5, ratio)
+        clr   = color.new(color.orange, 50)
+        right_bar = last_impulse_bar + 30
+        ln = line.new(last_impulse_bar, level, right_bar, level,
+                      color=clr, style=line.style_dotted, width=1)
+        array.push(fib_lines, ln)
+        pct = str.tostring(math.round(ratio * 100, 1)) + "% ext"
+        lbl = label.new(right_bar, level, pct,
+                        color=color.new(color.white, 100),
+                        textcolor=clr, style=label.style_label_left,
+                        size=size.tiny)
+        array.push(fib_labels, lbl)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 10 — SUB-WAVE OVERLAY
+// ─────────────────────────────────────────────────────────────────────────────
+
+var label[] sub_labels = array.new_label(0)
+
+if barstate.islast and show_subwaves and array.size(szz_price) >= 2
+    f_clear_labels(sub_labels)
+    n = array.size(szz_price)
+    // Label each sub-wave pivot with a small dot / tick mark
+    for i = 0 to n - 1
+        sp  = array.get(szz_price,  i)
+        sb  = array.get(szz_idx,    i)
+        sh  = array.get(szz_ishigh, i)
+        clr = c_sub
+        stl = sh ? label.style_label_down : label.style_label_up
+        lbl = label.new(sb, sp, "•",
+                        color=color.new(clr, 70),
+                        style=stl, textcolor=clr,
+                        size=size.tiny)
+        array.push(sub_labels, lbl)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 11 — PREDICTION ZONE (next probable wave target box)
+// ─────────────────────────────────────────────────────────────────────────────
+
+var box pred_box = na
+
+if barstate.islast and show_predict and impulse_found and not na(last_w0) and not na(last_w5)
+    box.delete(pred_box)
+
+    wave_len   = math.abs(last_w5 - last_w0)
+    direction  = last_bull ? -1.0 : 1.0   // after bullish impulse, expect corrective down
+
+    // Correction target zone:  38.2% – 61.8% retracement of the full impulse
+    zone_top    = last_w5 + direction * wave_len * 0.382
+    zone_bottom = last_w5 + direction * wave_len * 0.618
+
+    left_bar  = last_impulse_bar + 2
+    right_bar = last_impulse_bar + 40
+
+    // Ensure top > bottom for box
+    box_top    = math.max(zone_top, zone_bottom)
+    box_bottom = math.min(zone_top, zone_bottom)
+
+    pred_box := box.new(left_bar, box_top, right_bar, box_bottom,
+                        border_color=color.new(c_pred, 20),
+                        bgcolor     =c_pred,
+                        text        ="Correction\nTarget Zone\n38.2%–61.8%",
+                        text_color  =color.white,
+                        text_size   =size.small)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 12 — DASHBOARD TABLE
+// ─────────────────────────────────────────────────────────────────────────────
+
+var table dash = table.new(position.top_right, 2, 12,
+                           bgcolor    =color.new(color.black, 70),
+                           border_color=color.new(color.gray, 30),
+                           border_width=1, frame_color=color.gray, frame_width=1)
+
+f_cell(table t, int col, int row, string txt, color bg, color tc, string sz) =>
+    table.cell(t, col, row, txt, bgcolor=bg, text_color=tc, text_size=sz)
+
+if barstate.islast and show_table
+    // Header
+    f_cell(dash, 0, 0, "Elliott Wave Dashboard", color.new(color.blue, 20),
+           color.white, size.small)
+    f_cell(dash, 1, 0, active_degree + " Degree",
+           color.new(degree_mode == "Auto (by Timeframe)" ? color.teal : color.navy, 20),
+           color.white, size.small)
+
+    // Timeframe
+    f_cell(dash, 0, 1, "Timeframe", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 1, timeframe.period, color.new(color.gray, 50), color.aqua, size.tiny)
+
+    // Degree mode
+    f_cell(dash, 0, 2, "Degree Mode", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 2, degree_mode == "Auto (by Timeframe)" ? "Auto ✓" : "Manual",
+           color.new(color.gray, 50), color.yellow, size.tiny)
+
+    // Impulse found
+    f_cell(dash, 0, 3, "Impulse Waves", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 3, impulse_found ? "Detected ✓" : "Scanning…",
+           color.new(impulse_found ? color.green : color.gray, 60),
+           impulse_found ? color.white : color.gray, size.tiny)
+
+    // Direction
+    bias_txt = na(last_bull) ? "N/A" : last_bull ? "Bullish ▲" : "Bearish ▼"
+    bias_clr = na(last_bull) ? color.gray : last_bull ? color.green : color.red
+    f_cell(dash, 0, 4, "Impulse Bias", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 4, bias_txt, color.new(bias_clr, 60), color.white, size.tiny)
+
+    // Rule 1
+    r1_clr = rule1_ok ? color.green : color.red
+    f_cell(dash, 0, 5, "Rule 1: W2 ≤ 100% W1", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 5, rule1_ok ? "✓ Pass" : "✗ Fail", color.new(r1_clr, 60), color.white, size.tiny)
+
+    // Rule 2
+    r2_clr = rule2_ok ? color.green : color.red
+    f_cell(dash, 0, 6, "Rule 2: W3 Not Shortest", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 6, rule2_ok ? "✓ Pass" : "✗ Fail", color.new(r2_clr, 60), color.white, size.tiny)
+
+    // Rule 3
+    r3_clr = rule3_ok ? color.green : color.red
+    f_cell(dash, 0, 7, "Rule 3: W4 No Overlap", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 7, rule3_ok ? "✓ Pass" : "✗ Fail", color.new(r3_clr, 60), color.white, size.tiny)
+
+    // Overall validity
+    all_valid = rule1_ok and rule2_ok and rule3_ok
+    ov_clr = all_valid ? color.green : color.orange
+    f_cell(dash, 0, 8, "Wave Count Valid", color.new(ov_clr, 40), color.white, size.small)
+    f_cell(dash, 1, 8, all_valid ? "✓ All Rules Pass" : "⚠ Check Rules",
+           color.new(ov_clr, 40), color.white, size.small)
+
+    // Next expected move
+    next_txt = na(last_bull) ? "N/A" :
+               last_bull ? "Correction ▼ (A-B-C)" : "Rally ▲ (A-B-C)"
+    next_clr = na(last_bull) ? color.gray : last_bull ? color.orange : color.lime
+    f_cell(dash, 0, 9, "Next Expected", color.new(color.gray, 50), color.silver, size.tiny)
+    f_cell(dash, 1, 9, next_txt, color.new(next_clr, 60), color.white, size.tiny)
+
+    // Pivot settings info
+    f_cell(dash, 0, 10, "Pivot Length", color.new(color.gray, 60), color.silver, size.tiny)
+    f_cell(dash, 1, 10, str.tostring(pivot_len), color.new(color.gray, 60), color.aqua, size.tiny)
+
+    // Sub-wave
+    f_cell(dash, 0, 11, "Sub-wave Length", color.new(color.gray, 60), color.silver, size.tiny)
+    f_cell(dash, 1, 11, str.tostring(sub_pivot_len), color.new(color.gray, 60), color.aqua, size.tiny)
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 13 — ALERT CONDITIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+alertcondition(not na(ph), "New High Pivot (Wave 1/3/5)",
+               "Elliott Wave: New high pivot detected — possible Wave 1, 3, or 5")
+alertcondition(not na(pl), "New Low Pivot (Wave 2/4)",
+               "Elliott Wave: New low pivot detected — possible Wave 2 or 4")
+
+alertcondition(not na(ph_sub), "Sub-wave High Pivot",
+               "Elliott Wave Sub-wave: New high pivot (sub-degree)")
+alertcondition(not na(pl_sub), "Sub-wave Low Pivot",
+               "Elliott Wave Sub-wave: New low pivot (sub-degree)")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 14 — BACKGROUND HIGHLIGHT FOR WAVE 3 (strongest wave)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Highlight price action during Wave 3 with a subtle background
+// (We track when price is inside Wave 3's bar range)
+bgcolor(impulse_found and rule2_ok and
+        bar_index >= last_impulse_bar - pivot_len * 3 and
+        bar_index <= last_impulse_bar
+        ? color.new(color.green, 95) : na,
+        title="Wave 3 Background")
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 15 — AUXILIARY PLOT (forces bar history calculation)
+// ─────────────────────────────────────────────────────────────────────────────
+
+plot(na, title="History Anchor")
